@@ -1013,7 +1013,9 @@ async fn drive_populator_restore(
             api,
             namespace,
             &populate_job,
-            &prime_name,
+            // The populator always writes into the prime PVC it just provisioned;
+            // `target.streamExec` never routes here (it is a DirectTarget).
+            RestoreDestination::Pvc(&prime_name),
             selection,
             true, // the populate Job name is re-used across every claim this Restore populates
         )
@@ -1768,21 +1770,36 @@ async fn drive_direct_restore(
     // Resolve the target PVC for the restore Job. DirectTarget is only reached for
     // an explicit PVC target (populator routes to AwaitingClaim in the reconcile
     // dispatch). Exhaustive over RestoreTarget so a new variant must be considered.
-    let target_pvc = match &restore.spec.target {
-        RestoreTarget::PvcRef(r) => r.name.clone(),
+    // Owned PVC name (when there is one) so the borrow in `destination` outlives
+    // the awaits below.
+    let target_pvc: Option<String> = match &restore.spec.target {
+        RestoreTarget::PvcRef(r) => Some(r.name.clone()),
         // `target.pvc` means the operator CREATES the PVC (ADR §3.6) — without
         // this the mover Job references a claim nobody made and sits Pending
         // forever (FailedScheduling: persistentvolumeclaim not found). This also
         // provisions the empty volume for the deploy-or-restore (no-snapshot) case.
         RestoreTarget::Pvc(t) => {
             ensure_restore_target_pvc(ctx, namespace, t).await?;
-            t.name.clone()
+            Some(t.name.clone())
         }
+        // A stream target creates nothing: the mover reads one virtual file out of
+        // the snapshot and pipes it into a command's stdin.
+        RestoreTarget::StreamExec(_) => None,
         RestoreTarget::Populator(_) => {
             return Err(Error::Invariant(
                 "DirectTarget restore reached with a populator target (should route to \
                  AwaitingClaim)"
                     .into(),
+            ));
+        }
+    };
+    let destination = match (&restore.spec.target, target_pvc.as_deref()) {
+        (RestoreTarget::StreamExec(t), _) => RestoreDestination::Stream(t),
+        (_, Some(pvc)) => RestoreDestination::Pvc(pvc),
+        // Unreachable: every non-stream direct arm above produced a name.
+        (_, None) => {
+            return Err(Error::Invariant(
+                "direct restore resolved no target PVC and no stream target".into(),
             ));
         }
     };
@@ -1829,7 +1846,7 @@ async fn drive_direct_restore(
         api,
         namespace,
         name,
-        &target_pvc,
+        destination,
         selection,
         false, // a direct restore is one-shot: its Job name is never re-used
     )
@@ -2113,6 +2130,33 @@ async fn reserve_restore_slot(
     .await
 }
 
+/// Where a direct restore writes: a mounted PVC, or a command's stdin in a
+/// running Pod. Borrowed and exhaustive, so a new [`RestoreTarget`] variant must
+/// decide how the mover Job is shaped before it compiles.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum RestoreDestination<'a> {
+    /// The classic path: the mover mounts this PVC read-write at `/restore` and
+    /// kopia writes the snapshot's files into it.
+    Pvc(&'a str),
+    /// The stream path: the mover reads ONE virtual file out of the snapshot and
+    /// pipes it into a command's stdin. No volume is mounted, so none of the
+    /// PVC-shaped machinery (colocation, target-PVC securityContext assessment)
+    /// applies.
+    Stream(&'a kopiur_api::restore::StreamExecTarget),
+}
+
+impl<'a> RestoreDestination<'a> {
+    /// The target PVC name, or `None` for a stream destination. Used by the
+    /// PVC-only steps so each reads as "this step needs a PVC" rather than
+    /// re-matching the enum.
+    fn pvc(&self) -> Option<&'a str> {
+        match self {
+            RestoreDestination::Pvc(name) => Some(name),
+            RestoreDestination::Stream(_) => None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_restore_mover(
     ctx: &Context,
@@ -2120,7 +2164,7 @@ async fn run_restore_mover(
     api: &Api<Restore>,
     namespace: &str,
     job_name: &str,
-    target_pvc: &str,
+    destination: RestoreDestination<'_>,
     selection: &RestoreSelection,
     reusable_job_name: bool,
 ) -> Result<MoverOutcome> {
@@ -2419,15 +2463,20 @@ async fn run_restore_mover(
     // consumer of the target PVC can read what the mover writes (matching UID / shared fsGroup
     // on the fresh volume). Never writes `False` — restore has no certain signal, so the
     // advisory negative lives in the admission warning. Never fatal.
-    assess_restore_security_context(
-        namespace,
-        restore,
-        target_pvc,
-        &resolved_mover.security_context,
-        resolved_mover.pod_security_context.as_ref(),
-        ctx,
-    )
-    .await;
+    // PVC-only: the assessment compares the mover's identity against the FUTURE
+    // consumer of the target volume. A stream destination writes no volume, so
+    // there is no consumer and nothing to assess.
+    if let Some(target_pvc) = destination.pvc() {
+        assess_restore_security_context(
+            namespace,
+            restore,
+            target_pvc,
+            &resolved_mover.security_context,
+            resolved_mover.pod_security_context.as_ref(),
+            ctx,
+        )
+        .await;
+    }
 
     let owner = io::owner_ref_for(restore, "Restore")?;
     let repo_ref = restore.spec.repository.as_ref();
@@ -2591,25 +2640,36 @@ async fn run_restore_mover(
         // MissingDependency retry, never the Snapshot-side terminal machinery
         // (Restore's parking precedent, `waitTimeout`/`onMissing`, is about
         // snapshots, not PVCs).
-        let decision = match io::resolve_source_colocation(
-            &ctx.client,
-            namespace,
-            target_pvc,
-            resolved_mover.source_colocation,
-        )
-        .await?
-        {
-            io::ColocationOutcome::Resolved(decision) => decision,
-            io::ColocationOutcome::SourcePvcAbsent {
-                namespace: pvc_ns,
-                name: pvc_name,
-            } => return Err(restore_target_pvc_race_error(&pvc_ns, &pvc_name)),
-        };
-        io::apply_colocation(
-            decision,
-            resolved_mover.affinity.clone(),
-            resolved_mover.tolerations.clone(),
-        )?
+        // Colocation places the mover next to the PVC it writes. A stream
+        // destination has no PVC to be near, so there is nothing to colocate on —
+        // yield the recipe's own affinity/tolerations unchanged.
+        match destination.pvc() {
+            None => (
+                resolved_mover.affinity.clone(),
+                resolved_mover.tolerations.clone(),
+            ),
+            Some(target_pvc) => {
+                let decision = match io::resolve_source_colocation(
+                    &ctx.client,
+                    namespace,
+                    target_pvc,
+                    resolved_mover.source_colocation,
+                )
+                .await?
+                {
+                    io::ColocationOutcome::Resolved(decision) => decision,
+                    io::ColocationOutcome::SourcePvcAbsent {
+                        namespace: pvc_ns,
+                        name: pvc_name,
+                    } => return Err(restore_target_pvc_race_error(&pvc_ns, &pvc_name)),
+                };
+                io::apply_colocation(
+                    decision,
+                    resolved_mover.affinity.clone(),
+                    resolved_mover.tolerations.clone(),
+                )?
+            }
+        }
     };
     let inputs = MoverJobInputs {
         name: job_name,
@@ -2654,7 +2714,11 @@ async fn run_restore_mover(
             labels
         },
         // Restore writes INTO the target PVC, mounted read-write at /restore.
-        source_volume: Some(VolumeMountSpec::pvc(target_pvc, target_path, false)),
+        // A stream destination mounts nothing — the bytes go straight from kopia
+        // into an exec stdin, never touching a filesystem.
+        source_volume: destination
+            .pvc()
+            .map(|pvc| VolumeMountSpec::pvc(pvc, target_path, false)),
         repo_volume,
         creds_secrets,
         result_configmap: None,
