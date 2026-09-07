@@ -1,0 +1,111 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+#
+# Fork-only image build. The upstream `Release` workflow publishes to
+# ghcr.io/home-operations/* through a reusable org workflow that a fork cannot
+# use; this one builds the same three Dockerfiles with plain buildx and pushes
+# to the fork's own GHCR namespace so a feature branch can be deployed to a real
+# cluster before it is upstreamed.
+name: Fork images
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Target platforms
+        default: linux/amd64
+        required: false
+        type: string
+  push:
+    branches:
+      - "feat/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  versions:
+    name: Versions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      kopia-version: ${{ steps.versions.outputs.kopia-version }}
+      rust-version: ${{ steps.versions.outputs.rust-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Mise
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          cache: false
+          experimental: true
+          install: false
+
+      - name: Resolve versions
+        id: versions
+        run: |
+          echo "kopia-version=$(mise config get tools.kopia)" >> "$GITHUB_OUTPUT"
+          echo "rust-version=$(mise config get tools.rust.version)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.component }})
+    needs: versions
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: controller
+            dockerfile: docker/Dockerfile
+            bin: kopiur-controller
+          - component: webhook
+            dockerfile: docker/Dockerfile
+            bin: kopiur-webhook
+          - component: mover
+            dockerfile: docker/Dockerfile.mover
+            bin: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.platforms || 'linux/amd64' }}
+          push: true
+          provenance: false
+          sbom: false
+          build-args: |
+            KOPIA_VERSION=${{ needs.versions.outputs.kopia-version }}
+            RUST_VERSION=${{ needs.versions.outputs.rust-version }}
+            ${{ matrix.bin && format('BIN={0}', matrix.bin) || '' }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/kopiur-${{ matrix.component }}:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/kopiur-${{ matrix.component }}:branch-${{ github.ref_name == 'main' && 'main' || 'dev' }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
