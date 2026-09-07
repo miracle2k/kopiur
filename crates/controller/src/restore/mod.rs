@@ -2582,6 +2582,7 @@ async fn run_restore_mover(
     let work_spec = MoverWorkSpec {
         version: 2,
         operation: Operation::Restore(RestoreOp {
+            stdout: None,
             source: selection.clone(),
             target_path: target_path.clone(),
             anchor,
