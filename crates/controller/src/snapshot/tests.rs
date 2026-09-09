@@ -3590,6 +3590,57 @@ mod recorded_meta_tests {
         assert_eq!(meta.src, RecordedSrc::Explicit);
         assert_eq!(meta.gid, Some(3002));
     }
+
+    #[test]
+    fn rw_publication_resume_removes_obsolete_recorded_ownership() {
+        // Model the actual RFC 7396 status merge, starting with ownership from
+        // a legacy Job. A fresh compatible Job must not leave restore metadata
+        // claiming that kubelet assigned its source an fsGroup.
+        for sc in [
+            None,
+            Some(SecurityContext {
+                run_as_user: Some(1000),
+                run_as_group: Some(1001),
+                ..Default::default()
+            }),
+        ] {
+            let resolved = kopiur_api::common::resolve_mover_for_rw_publication(
+                None,
+                sc.as_ref(),
+                None,
+                None,
+                None,
+                None,
+            );
+            let meta = recorded_meta(&resolved, &InheritOutcome::NotRequested, None);
+            let mut current = serde_json::json!({
+                "recorded": {
+                    "schema": 1,
+                    "src": "inherited",
+                    "uid": 2000,
+                    "gid": 2001,
+                    "fsGroup": 65532
+                },
+                "phase": "Running"
+            });
+            json_patch::merge(
+                &mut current,
+                &serde_json::json!({"recorded": recorded_status_patch(&meta, true)}),
+            );
+            let tag: serde_json::Value =
+                serde_json::from_str(&kopiur_api::encode_meta_tag(&meta)).unwrap();
+            assert_eq!(current["recorded"], tag);
+            assert!(current["recorded"].get("fsGroup").is_none());
+            assert_eq!(current["phase"], "Running");
+        }
+    }
+
+    #[test]
+    fn legacy_recorded_status_patch_keeps_existing_serialization() {
+        let resolved = resolve_mover(None, None, None, None, None, None);
+        let meta = recorded_meta(&resolved, &InheritOutcome::NotRequested, None);
+        assert_eq!(recorded_status_patch(&meta, false), serde_json::json!(meta));
+    }
 }
 
 // --- inherit_verdict: what `inheritSecurityContextFrom` actually achieved. ---

@@ -56,7 +56,9 @@ The drill checks:
    long enough to check this.
 5. Source marker contents, UID/GID, modes, POSIX ACLs, user xattrs and nanosecond
    mtimes match before and after each backup. Reads may update atime, so it is
-   deliberately excluded. The second run receives fresh random payload bytes
+   deliberately excluded. A separate whole-source inventory includes the PVC
+   root, unchanged ext4 `lost+found`, and seed marker, so root-level ownership or
+   mode changes are detected too. The second run receives fresh random payload bytes
    before recording its own baseline, preventing repository deduplication from
    bypassing the live runtime checks.
 6. Ordinary `emptyDir` works without `fsGroup`. A second run explicitly uses

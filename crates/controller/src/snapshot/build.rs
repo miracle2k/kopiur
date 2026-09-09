@@ -516,6 +516,28 @@ pub(super) fn recorded_meta(
     }
 }
 
+/// The recorded identity as a JSON Merge Patch for the launch status write.
+///
+/// A Running Snapshot resumes from its current policy when its Job disappears.
+/// If that policy now uses RW publication, the previous run's recorded fsGroup
+/// must disappear too: omitting an absent optional field in a merge patch leaves
+/// its OLD value intact. Explicit nulls remove stale ownership fields so later
+/// restores see the same identity as the fresh `kopiur-meta` tag. This affects
+/// recorded status only; the Pod always uses the independently resolved context.
+/// Legacy launches keep their existing serialized patch unchanged.
+pub(super) fn recorded_status_patch(
+    recorded: &kopiur_api::RecordedSnapshotMeta,
+    rw_publication: bool,
+) -> serde_json::Value {
+    let mut patch = serde_json::json!(recorded);
+    if rw_publication {
+        patch["uid"] = serde_json::json!(recorded.uid);
+        patch["gid"] = serde_json::json!(recorded.gid);
+        patch["fsGroup"] = serde_json::json!(recorded.fs_group);
+    }
+    patch
+}
+
 /// Resolve the kopia `policy set` knobs the mover applies before snapshotting
 /// (compression / files / errorHandling / upload / extraArgs). Delegates to the
 /// single tested mapping so these flattened `SnapshotPolicy` fields are never

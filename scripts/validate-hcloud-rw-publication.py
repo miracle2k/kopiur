@@ -34,10 +34,6 @@ SEED = r"""
 import os, pathlib, struct, time
 root = pathlib.Path('/data')
 if not (root / 'ordinary-files').exists():
-    # ext4's fresh lost+found is root-only. It contains no application data;
-    # prepare this disposable fixture before recording the preservation baseline.
-    if (root / 'lost+found').exists():
-        os.chmod(root / 'lost+found', 0o755)
     d = root / 'ordinary-files'
     d.mkdir()
     os.chown(d, 65532, 65532)

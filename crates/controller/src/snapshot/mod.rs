@@ -2028,7 +2028,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         "resolved": resolved_run_status(&config, &namespace, &work_spec, repo_ref),
         // The SAME value written into the kopia `kopiur-meta` tag above —
         // single source, so tag and status cannot diverge.
-        "recorded": recorded,
+        "recorded": recorded_status_patch(&recorded, rw_publication),
     });
     // A previously PARKED run has just been admitted: flip
     // `RepositorySlotAvailable` to True here, in the pass's LAST status write,
