@@ -432,6 +432,7 @@ Externally tagged — set **exactly one** of: `nfs` · `pvc`.
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ###### `spec.maintenance.mover.inheritSecurityContextFrom` { #repository-spec-maintenance-mover-inheritsecuritycontextfrom }
@@ -507,6 +508,7 @@ Externally tagged — set **exactly one** of: `pvcConsumer` · `snapshot` · `wo
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.moverDefaults.scratch` { #repository-spec-moverdefaults-scratch }
@@ -1500,6 +1502,7 @@ Externally tagged — set **exactly one** of: `nfs` · `pvc`.
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ###### `spec.maintenance.mover.inheritSecurityContextFrom` { #clusterrepository-spec-maintenance-mover-inheritsecuritycontextfrom }
@@ -1575,6 +1578,7 @@ Externally tagged — set **exactly one** of: `pvcConsumer` · `snapshot` · `wo
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.moverDefaults.scratch` { #clusterrepository-spec-moverdefaults-scratch }
@@ -2335,6 +2339,7 @@ Externally tagged — set **exactly one** of: `httpRequest` · `runJob` · `work
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.mover.inheritSecurityContextFrom` { #snapshotpolicy-spec-mover-inheritsecuritycontextfrom }
@@ -2408,11 +2413,13 @@ Externally tagged — set **exactly one** of: `nfs` · `pvc` · `pvcSelector` ·
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `acknowledgeLiveMutation` | boolean | — | Acknowledges that `copyMethod: Direct` + `readOnly: false` lets the kubelet recursively `chgrp` the **live** volume to the mover's `fsGroup` and make it group-writable — permanently, while the workload is running. Required for that combination alone.<br>Ignored (not rejected) otherwise: it is an acknowledgement, never harmful to carry, and rejecting a stale one would make switching `copyMethod` between `Direct` and `Snapshot`/`Clone` a two-step edit in both directions. |
+| `acknowledgeLiveMutation` | boolean | — | Acknowledges that `copyMethod: Direct` + `readOnly: false` lets the kubelet recursively `chgrp` the **live** volume to the mover's `fsGroup` and make it group-writable — permanently, while the workload is running. Required for that combination alone.<br>Rejected in RW-publication compatibility mode, where live mutation is forbidden. Ignored otherwise: it is an acknowledgement, never harmful to carry, and rejecting a stale one would make switching `copyMethod` between `Direct` and `Snapshot`/`Clone` a two-step edit in both directions. |
+| `acknowledgeReadWritePublication` | boolean | — | Explicitly accepts a writable CSI publication while the mover container's source mount stays read-only. Required with `pvcPublicationReadOnly: false`; this does not authorize live-source mutation or replace `acknowledgeLiveMutation`. CSI publication RW does not grant the mover process write access, but the read-only mount is process-level protection, not immutable source storage. |
 | `nfs` | [object](#snapshotpolicy-spec-sources-nfs) | — | An inline NFS export to back up directly. Mutually exclusive with `pvc`/`pvcSelector`/`stream`. |
 | `pvc` | [object](#snapshotpolicy-spec-sources-pvc) | — | Single PVC by name. Mutually exclusive with `pvcSelector`/`nfs`. |
+| `pvcPublicationReadOnly` | boolean | — | Whether CSI publishes the source PVC read-only. When absent, resolves to `readOnly`, preserving existing policies exactly; this context-dependent default must not be materialized as a constant in the CRD.<br>Set `false` only for the opt-in Direct PVC RW-publication compatibility mode: one literal ReadWriteOnce PVC, `copyMethod: Direct`, `readOnly: true`, and `acknowledgeReadWritePublication: true`. The mover's mount remains read-only, while CSI receives a writable publication. This accommodates drivers that reject a second same-node read-only publication of a live writable PVC. Any effective `fsGroup` or `fsGroupChangePolicy` is forbidden because kubelet could otherwise recursively rewrite ownership or modes on the live source. Effective `seLinuxOptions` or `seLinuxChangePolicy` is also forbidden to prevent source relabeling; this mode grants access only through process identity. |
 | `pvcSelector` | [object](#snapshotpolicy-spec-sources-pvcselector) | — | Label/namespace selector matching many PVCs. Mutually exclusive with `pvc`/`nfs`. |
-| `readOnly` | boolean | `true` | Mount the source read-only (default `true`; kopia only ever reads it).<br>Set `false` **only** to make `fsGroup` work on the source. The kubelet applies `fsGroup` by recursively `chgrp`-ing the volume and adding group-write — and it skips that walk entirely on a read-only mount, which is why a mover `fsGroup`/`fsGroupChangePolicy` otherwise has no effect here. Under `copyMethod: Snapshot`/`Clone` the walk rewrites the throwaway staged PVC and never touches your data. Under `copyMethod: Direct` it rewrites the LIVE volume, which requires `acknowledgeLiveMutation`.<br>Not supported on an `nfs` source: the kubelet does not apply `fsGroup` to in-tree NFS volumes at all, so a read-write mount would grant nothing. |
+| `readOnly` | boolean | `true` | Mount the source read-only inside the mover container (default `true`). Also controls PVC publication unless `pvcPublicationReadOnly` is explicitly set.<br>Set `false` **only** to make `fsGroup` work on the source. The kubelet applies `fsGroup` by recursively `chgrp`-ing the volume and adding group-write — and it skips that walk entirely on a read-only mount, which is why a mover `fsGroup`/`fsGroupChangePolicy` otherwise has no effect here. Under `copyMethod: Snapshot`/`Clone` the walk rewrites the throwaway staged PVC and never touches your data. Under `copyMethod: Direct` it rewrites the LIVE volume, which requires `acknowledgeLiveMutation`.<br>Not supported on an `nfs` source: the kubelet does not apply `fsGroup` to in-tree NFS volumes at all, so a read-write mount would grant nothing. |
 | `sourcePathOverride` | string | —<br><sub>maxLength 4096</sub> | What kopia records as the source path (default `/pvc/&lt;name&gt;`, or the NFS export `path`). |
 | `sourcePathStrategy` | enum: PvcName \| PvcNamespacedName | `PvcName` | How a selector-matched PVC's source path is derived. Only relevant for `pvcSelector` sources, where one recipe expands to many PVCs and each needs a distinct kopia source path. Defaults to `PvcName`. |
 | `stream` | [object](#snapshotpolicy-spec-sources-stream) | — | Capture a command's standard output as one virtual file — a logical backup (`pg_dumpall`, `mysqldump`, …) rather than a volume copy. Mutually exclusive with `pvc`/`pvcSelector`/`nfs`. No volume is mounted; the mover execs the command in a running workload Pod and streams its stdout straight into kopia. |
@@ -3116,6 +3123,7 @@ Externally tagged — set **exactly one** of: `populator` · `pvc` · `pvcRef` �
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.mover.inheritSecurityContextFrom` { #restore-spec-mover-inheritsecuritycontextfrom }
@@ -3365,6 +3373,7 @@ Externally tagged — set **exactly one** of: `pvcConsumer` · `snapshot` · `wo
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.mover.inheritSecurityContextFrom` { #maintenance-spec-mover-inheritsecuritycontextfrom }
@@ -3742,6 +3751,7 @@ Externally tagged — set **exactly one** of: `nfs` · `pvc`.
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.mover.inheritSecurityContextFrom` { #repositoryreplication-spec-mover-inheritsecuritycontextfrom }
@@ -3915,6 +3925,7 @@ Externally tagged — set **exactly one** of: `pvcConsumer` · `snapshot` · `wo
 | `contentCacheSizeMb` | integer | — | kopia content cache budget in MiB (`--content-cache-size-mb`). |
 | `metadataCacheSizeMb` | integer | — | kopia metadata cache budget in MiB (`--metadata-cache-size-mb`). |
 | `mode` | enum: Ephemeral \| Persistent | — | How a mover's kopia cache volume is provisioned. |
+| `ownership` | enum: InitContainer | — | Optional preparation of the mover's cache root, independent of Pod fsGroup. |
 | `storageClassName` | string | — | StorageClass for the cache PVC; absent uses the cluster default. |
 
 ##### `spec.mover.inheritSecurityContextFrom` { #snapshotreplication-spec-mover-inheritsecuritycontextfrom }

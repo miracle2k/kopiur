@@ -67,6 +67,7 @@ use kopiur_mover::workspec::*;
 let spec = MoverWorkSpec {
     version: 1,
     operation: Operation::Snapshot(SnapshotOp {
+        require_read_only_source: false,
         stdin: None,
         source_path: "/data".into(),
         tags: BTreeMap::new(),
@@ -107,6 +108,40 @@ assert_eq!(spec.operation.kind_str(), "Snapshot");
 
 The actual `kopia` invocation and the kube `PATCH` happen in the binary against a
 real repository and cluster, so they are not runnable doctests.
+
+## Direct PVC RW-publication protection
+
+Explicit compatibility Jobs publish the source PVC RW to CSI and mount it RO in
+the mover. **CSI publication RW != mover process write access.** The main mover
+keeps its normal non-root hardening. Pod `fsGroup` and `fsGroupChangePolicy` are
+rejected before Job creation, because kubelet could otherwise rewrite the live
+source's ownership and modes before this binary ever runs.
+
+The work spec's `requireReadOnlySource` marker and independent
+`--require-read-only-source PATH` argument must agree. Before any Kopia command or
+credential staging, the mover verifies an exact RO source mount in
+`/proc/self/mountinfo`, rejects any writable nested mount, and checks that its
+cache is writable under the actual process identity. It checks per-mount flags;
+the underlying filesystem superblock correctly remains RW for the application.
+Protected system, credential, and cache paths cannot be used as source mounts.
+
+Optional `cache-init --uid UID --gid GID` runs in the same pinned image. It receives
+only the ordinary emptyDir cache at `/var/cache/kopia`, with no env, source,
+repository, work spec, or service-account credentials. It accepts only an empty
+root:root cache root, opens it without following symlinks, chmods that inode to
+0700, then uses its sole added CHOWN capability to assign the effective mover
+UID/GID. Reused caches fail closed. This root init container requires the deliberate
+namespace privilege gate; Pod-wide fsGroup remains absent. API credentials are
+explicitly projected only into the main mover, with automatic token mounts off.
+
+Admission validates the final Job/Pod shape and forbids injected containers or
+altered source mounts; common sidecar injectors also receive opt-out annotations.
+The RO bind mount is strong process-level protection, not immutable hardware,
+application consistency, or a guarantee against a cluster administrator.
+
+For a disposable-volume test, `kopiur-mover verify-source-mount PATH --write-probe`
+verifies mountinfo and then requires an attempted create to fail with `EROFS`.
+Production startup never attempts to write the source.
 
 ## See also
 

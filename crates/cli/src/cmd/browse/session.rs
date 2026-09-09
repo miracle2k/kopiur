@@ -396,7 +396,8 @@ async fn create_session_job(
             source,
             mount_path: filesystem_repo_path(&target.repo.backend)
                 .expect("a backend with a repo volume has a repo path"),
-            read_only: true,
+            pvc_publication_read_only: true,
+            container_mount_read_only: true,
         });
 
     // Workload identity: the session pod must run as the backend's federated
@@ -417,6 +418,7 @@ async fn create_session_job(
     }
 
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: &name,
         namespace: ns,
         owner: owner_ref_for_repo(&target.repo),

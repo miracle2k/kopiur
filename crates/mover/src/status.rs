@@ -155,6 +155,7 @@ impl From<&crate::error::MoverError> for FailureBlock {
                 Some(op.as_str().to_string()),
             ),
             MoverError::BootstrapFailed { .. }
+            | MoverError::SourceProtection(_)
             | MoverError::WorkSpecPathMissing
             | MoverError::WorkSpecRead { .. }
             | MoverError::WorkSpecParse { .. }

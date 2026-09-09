@@ -64,6 +64,7 @@ use crate::jobs::{self, JobLimits, MoverJobInputs, VolumeMountSpec};
 mod batch;
 mod build;
 mod plan;
+mod publication;
 
 pub use batch::*;
 pub(crate) use build::*;
@@ -1164,6 +1165,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
 
     let (mut work_spec, mut source_volume, repo_volume, _) =
         build_backup_run(backup, &config, &repo, &namespace, &name)?;
+    let rw_publication = kopiur_api::snapshot_policy::policy_requests_rw_publication(&config.spec);
 
     // The mover Job runs in THIS (workload) namespace, where the operator SA does
     // not exist. Resolve its run identity here — the user's workload-identity SA
@@ -1305,7 +1307,15 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     // Both the privileged-mover gate below and the Job run on the MERGED result, so an
     // elevation introduced by moverDefaults is gated too, and a partial recipe override
     // can only tighten (never drops the hardened drop:[ALL]/seccomp).
-    let resolved_mover = kopiur_api::common::resolve_mover(
+    // RW publication changes what kubelet may do to the LIVE source, before
+    // container startup. Select an empty Pod baseline before merging any layer;
+    // never resolve the ordinary fsGroup baseline and silently strip it later.
+    let resolver = if rw_publication {
+        kopiur_api::common::resolve_mover_for_rw_publication
+    } else {
+        kopiur_api::common::resolve_mover
+    };
+    let resolved_mover = resolver(
         repo.mover_defaults.as_ref(),
         effective_sc.as_ref(),
         effective_pod_sc.as_ref(),
@@ -1322,6 +1332,64 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             .as_ref()
             .and_then(|m| m.ttl_seconds_after_finished),
     );
+
+    let cache_ownership = if rw_publication {
+        match publication::validate_effective(&config, &repo.backend, &resolved_mover) {
+            Ok(target) => target,
+            Err(e) => {
+                io::patch_status(
+                    &api,
+                    &name,
+                    snapshot_ready_status(
+                        backup,
+                        SnapshotPhase::Failed,
+                        "UnsafeReadWritePublication",
+                        &e.to_string(),
+                    ),
+                )
+                .await?;
+                return Ok(Action::await_change());
+            }
+        }
+    } else {
+        None
+    };
+    if rw_publication {
+        if let Err(e) = publication::require_admission_protection(&ctx.client).await {
+            io::patch_status(
+                &api,
+                &name,
+                snapshot_ready_status(
+                    backup,
+                    SnapshotPhase::Pending,
+                    "ReadWritePublicationAdmissionUnavailable",
+                    &e.to_string(),
+                ),
+            )
+            .await?;
+            return Err(e);
+        }
+        let claim = source_pvc.ok_or_else(|| {
+            Error::Validation("RW publication requires a literal PVC source".into())
+        })?;
+        if let Err(e) = publication::validate_live_claim(&ctx.client, &namespace, claim).await {
+            if !matches!(&e, Error::Validation(_)) {
+                return Err(e);
+            }
+            io::patch_status(
+                &api,
+                &name,
+                snapshot_ready_status(
+                    backup,
+                    SnapshotPhase::Failed,
+                    "UnsafeReadWritePublication",
+                    &e.to_string(),
+                ),
+            )
+            .await?;
+            return Ok(Action::await_change());
+        }
+    }
 
     // Record the RESOLVED mover identity on the kopia snapshot itself (the
     // `kopiur-meta` tag) AND on `status.recorded` below — one value feeds both,
@@ -1365,18 +1433,27 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     // `kopiur.home-operations.com/privileged-movers` annotation — a tenant there could
     // otherwise reuse the minted mover SA at that privilege. Refuse with a clear
     // `MoverPermitted=False` condition + Event otherwise.
-    if kopiur_api::common::requires_privilege_resolved(
-        Some(&resolved_mover.security_context),
-        resolved_mover.pod_security_context.as_ref(),
-        privileged_mode,
-    ) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
+    let cache_init_permitted = cache_ownership.is_none()
+        || publication::cache_init_allowed(&ctx.client, &namespace).await?;
+    if !cache_init_permitted
+        || (kopiur_api::common::requires_privilege_resolved(
+            Some(&resolved_mover.security_context),
+            resolved_mover.pod_security_context.as_ref(),
+            privileged_mode,
+        )) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
     {
         let sa = ctx
             .mover_service_account
             .as_deref()
             .unwrap_or(config::DEFAULT_MOVER_NAME);
-        let msg =
-            io::privileged_mover_message("SnapshotPolicy", &config.name_any(), &namespace, sa);
+        let msg = if !cache_init_permitted {
+            format!(
+                "SnapshotPolicy `{}` requests cache ownership: InitContainer, which runs a cache-only root initializer; namespace `{namespace}` must explicitly set kopiur.home-operations.com/privileged-movers=true and permit this Pod under Pod Security Admission",
+                config.name_any()
+            )
+        } else {
+            io::privileged_mover_message("SnapshotPolicy", &config.name_any(), &namespace, sa)
+        };
         let existing = backup
             .status
             .as_ref()
@@ -1454,7 +1531,9 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
             claim,
             // The mount the assessment must reason about — already decided, so this
             // costs nothing to thread (`readOnly: false` changes what fsGroup means).
-            source_volume.as_ref().is_none_or(|v| v.read_only),
+            source_volume
+                .as_ref()
+                .is_none_or(|v| v.container_mount_read_only),
             &resolved_mover.security_context,
             resolved_mover.pod_security_context.as_ref(),
             mover_security.unfiltered_pods.as_deref(),
@@ -1637,7 +1716,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 *mount = VolumeMountSpec::pvc(
                     staged.pvc_name.clone(),
                     mount.mount_path.clone(),
-                    mount.read_only,
+                    mount.container_mount_read_only,
                 );
             }
             let existing = backup
@@ -1857,7 +1936,11 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
                 &ctx.client,
                 &namespace,
                 &claim,
-                resolved_mover.source_colocation,
+                if rw_publication {
+                    kopiur_api::common::SourceColocationMode::Required
+                } else {
+                    resolved_mover.source_colocation
+                },
             )
             .await?
             {
@@ -1899,6 +1982,7 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
         ),
     };
     let inputs = MoverJobInputs {
+        cache_ownership,
         name: &name,
         namespace: &namespace,
         owner,
@@ -4105,7 +4189,8 @@ async fn build_batch_job(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     // Inherit the repository's moverDefaults (security context, placement) so the
     // batch can reach a filesystem/NFS repo on a non-65532-owned directory.
@@ -4134,6 +4219,7 @@ async fn build_batch_job(
     .await?;
     mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: job_name,
         namespace: job_ns,
         owner,
@@ -4311,7 +4397,8 @@ async fn reconcile_pin(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     let resolved_mover = kopiur_api::common::resolve_mover(
         repo.mover_defaults.as_ref(),
@@ -4336,6 +4423,7 @@ async fn reconcile_pin(
     .await?;
     mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: &job_name,
         namespace,
         owner,

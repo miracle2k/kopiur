@@ -895,6 +895,12 @@ spec:
                             - Persistent
                             nullable: true
                             type: string
+                          ownership:
+                            description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                            enum:
+                            - InitContainer
+                            nullable: true
+                            type: string
                           storageClassName:
                             description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true
@@ -1869,6 +1875,12 @@ spec:
                         enum:
                         - Ephemeral
                         - Persistent
+                        nullable: true
+                        type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
                         nullable: true
                         type: string
                       storageClassName:
@@ -4840,6 +4852,12 @@ spec:
                             - Persistent
                             nullable: true
                             type: string
+                          ownership:
+                            description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                            enum:
+                            - InitContainer
+                            nullable: true
+                            type: string
                           storageClassName:
                             description: StorageClass for the cache PVC; absent uses the cluster default.
                             nullable: true
@@ -5814,6 +5832,12 @@ spec:
                         enum:
                         - Ephemeral
                         - Persistent
+                        nullable: true
+                        type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
                         nullable: true
                         type: string
                       storageClassName:
@@ -8324,6 +8348,12 @@ spec:
                         - Persistent
                         nullable: true
                         type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
@@ -8851,9 +8881,19 @@ spec:
                         group-writable — permanently, while the workload is running. Required for that
                         combination alone.
 
-                        Ignored (not rejected) otherwise: it is an acknowledgement, never harmful to
+                        Rejected in RW-publication compatibility mode, where live mutation is forbidden.
+                        Ignored otherwise: it is an acknowledgement, never harmful to
                         carry, and rejecting a stale one would make switching `copyMethod` between
                         `Direct` and `Snapshot`/`Clone` a two-step edit in both directions.
+                      nullable: true
+                      type: boolean
+                    acknowledgeReadWritePublication:
+                      description: |-
+                        Explicitly accepts a writable CSI publication while the mover container's
+                        source mount stays read-only. Required with `pvcPublicationReadOnly: false`;
+                        this does not authorize live-source mutation or replace `acknowledgeLiveMutation`.
+                        CSI publication RW does not grant the mover process write access, but the
+                        read-only mount is process-level protection, not immutable source storage.
                       nullable: true
                       type: boolean
                     nfs:
@@ -8880,6 +8920,23 @@ spec:
                       required:
                       - name
                       type: object
+                    pvcPublicationReadOnly:
+                      description: |-
+                        Whether CSI publishes the source PVC read-only. When absent, resolves to
+                        `readOnly`, preserving existing policies exactly; this context-dependent
+                        default must not be materialized as a constant in the CRD.
+
+                        Set `false` only for the opt-in Direct PVC RW-publication compatibility mode:
+                        one literal ReadWriteOnce PVC, `copyMethod: Direct`, `readOnly: true`, and
+                        `acknowledgeReadWritePublication: true`. The mover's mount remains read-only,
+                        while CSI receives a writable publication. This accommodates drivers that
+                        reject a second same-node read-only publication of a live writable PVC.
+                        Any effective `fsGroup` or `fsGroupChangePolicy` is forbidden because kubelet
+                        could otherwise recursively rewrite ownership or modes on the live source.
+                        Effective `seLinuxOptions` or `seLinuxChangePolicy` is also forbidden to
+                        prevent source relabeling; this mode grants access only through process identity.
+                      nullable: true
+                      type: boolean
                     pvcSelector:
                       description: Label/namespace selector matching many PVCs. Mutually exclusive with `pvc`/`nfs`.
                       nullable: true
@@ -8929,7 +8986,8 @@ spec:
                     readOnly:
                       default: true
                       description: |-
-                        Mount the source read-only (default `true`; kopia only ever reads it).
+                        Mount the source read-only inside the mover container (default `true`).
+                        Also controls PVC publication unless `pvcPublicationReadOnly` is explicitly set.
 
                         Set `false` **only** to make `fsGroup` work on the source. The kubelet applies
                         `fsGroup` by recursively `chgrp`-ing the volume and adding group-write — and it
@@ -10739,6 +10797,12 @@ spec:
                         - Persistent
                         nullable: true
                         type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
@@ -11788,6 +11852,12 @@ spec:
                         enum:
                         - Ephemeral
                         - Persistent
+                        nullable: true
+                        type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
                         nullable: true
                         type: string
                       storageClassName:
@@ -12963,6 +13033,12 @@ spec:
                         - Persistent
                         nullable: true
                         type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true
@@ -13759,6 +13835,12 @@ spec:
                         enum:
                         - Ephemeral
                         - Persistent
+                        nullable: true
+                        type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
                         nullable: true
                         type: string
                       storageClassName:

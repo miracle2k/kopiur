@@ -154,6 +154,9 @@ pub const MISSING_SAMPLE_CAP: usize = 10;
 /// status PATCH / process exit.
 #[derive(Debug, thiserror::Error)]
 pub enum MoverError {
+    /// Refuse an unsafe Direct compatibility run before invoking Kopia.
+    #[error("Direct PVC source protection failed: {0}")]
+    SourceProtection(String),
     /// A kopia subprocess call failed. Names the invocation and keeps the full
     /// [`KopiaError`] (class, stderr tail, exit code) as the source.
     #[error("{} failed (class {}): {}", .op.as_str(), .source.class(), .source)]
@@ -604,6 +607,7 @@ impl MoverError {
             MoverError::Kopia { source, .. } => source.class(),
             MoverError::BootstrapFailed { class, .. } => *class,
             MoverError::WorkSpecPathMissing
+            | MoverError::SourceProtection(_)
             | MoverError::WorkSpecRead { .. }
             | MoverError::WorkSpecParse { .. }
             | MoverError::ServerSpecPathMissing

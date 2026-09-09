@@ -57,6 +57,31 @@ use kopiur_mover::workspec::{SnapshotDeleteItem, SnapshotDeleteOp};
 fn main() -> std::process::ExitCode {
     let cli = MoverCli::parse();
     match &cli.command {
+        Some(MoverCommand::CacheInit { uid, gid }) => {
+            match kopiur_mover::cache_init::prepare(*uid, *gid) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("cache root initialization failed: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
+        Some(MoverCommand::VerifySourceMount { path, write_probe }) => {
+            let result = kopiur_mover::source_guard::verify_source_mount(path).and_then(|()| {
+                if *write_probe {
+                    kopiur_mover::source_guard::verify_write_refused(path)
+                } else {
+                    Ok(())
+                }
+            });
+            match result {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("source mount verification failed: {e}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
+        }
         // Readiness-probe mode, BEFORE the work-spec loading path: a
         // browse-session pod's readinessProbe execs `kopiur-mover ready` (the
         // distroless image has no shell to `test -f` with), which must exit 0
@@ -206,6 +231,11 @@ async fn run(cli: &MoverCli) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let spec = resolve_work_spec(cli.work_spec.clone())?;
+    // Do this before building/connecting Kopia or materializing credentials.
+    // Both the immutable Job arg and work-spec marker must agree; editing either
+    // side alone cannot accidentally disable this process-level protection.
+    kopiur_mover::source_guard::preflight(&spec.operation, cli.require_read_only_source.as_deref())
+        .map_err(|e| MoverError::SourceProtection(e.to_string()))?;
     let operation = spec.operation.kind_str().to_string();
     info!(
         operation = %operation,

@@ -635,7 +635,7 @@ fn build_backup_run_maps_nfs_source_to_inline_nfs_mount() {
     );
     assert_eq!(src.mount_path, "/mnt/eros/Media");
     assert!(
-        src.read_only,
+        src.container_mount_read_only,
         "a backup source is mounted read-only unless the recipe opts out"
     );
     // kopia records the export path as the snapshot source path.
@@ -704,11 +704,38 @@ fn build_backup_run_honors_source_read_only_false() {
         }
     );
     assert!(
-        !src.read_only,
-        "readOnly: false must reach the mount — one VolumeMountSpec.read_only drives BOTH \
-         the PVC volume source's readOnly and the container volumeMount's readOnly, and \
-         fsGroup needs both"
+        !src.container_mount_read_only,
+        "legacy readOnly: false must continue to give the mover a writable mount"
     );
+    assert!(!src.pvc_publication_read_only);
+}
+
+#[test]
+fn build_backup_run_separates_compatibility_publication_and_process_access() {
+    use kopiur_api::snapshot_policy::{PvcSource, Source};
+    let cfg = config_with_source(
+        "data",
+        Source {
+            pvc: Some(PvcSource {
+                name: "app-data".into(),
+            }),
+            read_only: Some(true),
+            pvc_publication_read_only: Some(false),
+            acknowledge_read_write_publication: Some(true),
+            ..Default::default()
+        },
+    );
+    let repo = resolved_s3_repo();
+    let (ws, source, repo_volume, _) =
+        build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "data").unwrap();
+    let source = source.unwrap();
+    assert!(!source.pvc_publication_read_only);
+    assert!(source.container_mount_read_only);
+    assert!(repo_volume.is_none());
+    match ws.operation {
+        Operation::Snapshot(op) => assert!(op.require_read_only_source),
+        other => panic!("expected snapshot, got {other:?}"),
+    }
 }
 
 #[test]
@@ -730,7 +757,11 @@ fn build_backup_run_defaults_an_unset_source_read_only_to_true() {
     let repo = resolved_s3_repo();
     let (_ws, source_volume, _repo, _creds) =
         build_backup_run(&dummy_backup(), &cfg, &repo, "ns", "data").unwrap();
-    assert!(source_volume.expect("a PVC source mount").read_only);
+    assert!(
+        source_volume
+            .expect("a PVC source mount")
+            .container_mount_read_only
+    );
 }
 
 #[test]
@@ -4121,6 +4152,7 @@ fn render_mover_job(
     use kopiur_mover::jobs::{JobLimits, MoverJobInputs, build_job};
     let ws = sample_backup_work_spec();
     build_job(&MoverJobInputs {
+        cache_ownership: None,
         name: "job-1",
         namespace: "prod",
         owner: kopiur_mover::jobs::owner_ref("Snapshot", "db-1", "uid-1"),
@@ -4291,6 +4323,7 @@ fn backup_mover_defaults_pod_metadata_reaches_the_pod_template() {
     // ... and exactly the two fields the backup site threads into the Job build.
     let ws = sample_backup_work_spec();
     let job = build_job(&MoverJobInputs {
+        cache_ownership: None,
         name: "db-1",
         namespace: "prod",
         owner: kopiur_mover::jobs::owner_ref("Snapshot", "db-1", "uid-1"),
@@ -4371,6 +4404,7 @@ fn sample_backup_work_spec() -> kopiur_mover::workspec::MoverWorkSpec {
     MoverWorkSpec {
         version: 1,
         operation: Operation::Snapshot(SnapshotOp {
+            require_read_only_source: false,
             stdin: None,
             source_path: "/data".into(),
             tags: BTreeMap::new(),

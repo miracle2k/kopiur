@@ -11,6 +11,11 @@ metadata:
   labels:
     {{- include "kopiur.labels" . | nindent 4 }}
 rules:
+  # Controller-only preflight for the exact RW-publication admission boundary.
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: [validatingadmissionpolicies, validatingadmissionpolicybindings]
+    resourceNames: [kopiur-rw-publication]
+    verbs: [get]
   - apiGroups:
       - kopiur.home-operations.com
     resources:

@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod bootstrap;
+pub mod cache_init;
 pub mod cli;
 pub mod credentials;
 pub mod env;
@@ -11,6 +12,7 @@ pub mod replicate;
 pub mod repo_meta;
 pub mod resolve;
 pub mod serve;
+pub mod source_guard;
 pub mod status;
 pub mod stream;
 pub mod workspec;

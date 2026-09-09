@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::workspec::MoverWorkSpec;
+use crate::workspec::{MoverWorkSpec, Operation, RepositoryConnect};
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Affinity, ConfigMap, Container, EmptyDirVolumeSource, EnvFromSource, EphemeralVolumeSource,
@@ -57,6 +57,9 @@ pub const RESULT_CONFIGMAP_ENV: &str = crate::env::RESULT_CONFIGMAP;
 /// actionable one instead. Real work specs are ~1 KiB; only a pathological
 /// recipe (hundreds of KiB of ignore rules / hooks) can approach this.
 pub const MAX_WORK_SPEC_BYTES: usize = 100 * 1024;
+pub use kopiur_api::rw_publication_admission::{
+    REQUIRED_READ_ONLY_SOURCE_ARG, RW_PUBLICATION_LABEL,
+};
 
 /// Why [`build_job`] refused to build. Closed enum with what/why/fix messages
 /// so every caller (controller reconcilers, the CLI browse spawner) surfaces
@@ -78,6 +81,9 @@ pub enum BuildJobError {
         /// Size of the serialized work spec.
         bytes: usize,
     },
+    /// A compatibility-mode invariant was violated before a Job could be created.
+    #[error("unsafe Direct PVC RW-publication mover: {0}")]
+    UnsafePublication(String),
 }
 
 /// Built-in `Job.spec.activeDeadlineSeconds` applied by [`build_job`] when a
@@ -203,10 +209,12 @@ pub struct VolumeMountSpec {
     pub source: MountSource,
     /// Absolute mount path inside the mover container.
     pub mount_path: String,
-    /// Whether the mount is read-only. Drives BOTH the volume source's `readOnly` and the
-    /// container `volumeMount`'s — the kubelet needs both to be false before it will apply
-    /// `fsGroup`. Snapshot sources default to read-only (`Source::readOnly`).
-    pub read_only: bool,
+    /// What the volume plugin/CSI driver publishes. Usually matches the process
+    /// mount; explicitly acknowledged Direct compatibility mode publishes RW.
+    pub pvc_publication_read_only: bool,
+    /// Process-visible mount permissions. A RW CSI publication does not grant
+    /// the mover write access when this remains true.
+    pub container_mount_read_only: bool,
 }
 
 impl VolumeMountSpec {
@@ -216,12 +224,25 @@ impl VolumeMountSpec {
         mount_path: impl Into<String>,
         read_only: bool,
     ) -> Self {
+        Self::pvc_with_publication(claim_name, mount_path, read_only, read_only)
+    }
+
+    /// PVC mount with independent backend publication and process permissions.
+    /// Callers must validate the narrow Direct compatibility policy; the builder
+    /// independently refuses unsafe security contexts and cache configurations.
+    pub fn pvc_with_publication(
+        claim_name: impl Into<String>,
+        mount_path: impl Into<String>,
+        pvc_publication_read_only: bool,
+        container_mount_read_only: bool,
+    ) -> Self {
         VolumeMountSpec {
             source: MountSource::Pvc {
                 claim_name: claim_name.into(),
             },
             mount_path: mount_path.into(),
-            read_only,
+            pvc_publication_read_only,
+            container_mount_read_only,
         }
     }
 
@@ -238,7 +259,8 @@ impl VolumeMountSpec {
                 path: path.into(),
             },
             mount_path: mount_path.into(),
-            read_only,
+            pvc_publication_read_only: read_only,
+            container_mount_read_only: read_only,
         }
     }
 
@@ -249,7 +271,7 @@ impl VolumeMountSpec {
                 name: name.to_string(),
                 persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                     claim_name: claim_name.clone(),
-                    read_only: Some(self.read_only),
+                    read_only: Some(self.pvc_publication_read_only),
                 }),
                 ..Default::default()
             },
@@ -258,7 +280,7 @@ impl VolumeMountSpec {
                 nfs: Some(NFSVolumeSource {
                     server: server.clone(),
                     path: path.clone(),
-                    read_only: Some(self.read_only),
+                    read_only: Some(self.pvc_publication_read_only),
                 }),
                 ..Default::default()
             },
@@ -270,10 +292,20 @@ impl VolumeMountSpec {
         VolumeMount {
             name: name.to_string(),
             mount_path: self.mount_path.clone(),
-            read_only: Some(self.read_only),
+            read_only: Some(self.container_mount_read_only),
             ..Default::default()
         }
     }
+}
+
+/// Target process identity for an explicitly gated cache-only initializer.
+/// The caller must first authorize this root container in the Job's namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheOwnershipTarget {
+    /// Effective mover UID, after container/pod/default resolution.
+    pub uid: u32,
+    /// Effective mover GID, after container/pod/default resolution.
+    pub gid: u32,
 }
 
 /// All inputs needed to build a mover run's `ConfigMap` + `Job`.
@@ -389,6 +421,9 @@ pub struct MoverJobInputs<'a> {
     /// generic ephemeral volume, or a persistent PVC). Resolved from the
     /// repository's `cacheDefaults` overlaid by the run's `mover.cache` (ADR §3.1).
     pub cache_volume: CacheVolume,
+    /// Opt-in cache root preparation using the same mover image. Initially only
+    /// ordinary emptyDir is supported; never use fsGroup for compatibility caches.
+    pub cache_ownership: Option<CacheOwnershipTarget>,
     /// Writable scratch volume for the deep-verify scratch-restore, mounted
     /// read-write at [`DEEP_SCRATCH_PATH`]. `Some` only for deep-verify runs
     /// (`None` for every other mover op). Resolved from `verification.deep`'s
@@ -504,6 +539,128 @@ fn cache_volume_source(cache: &CacheVolume) -> Volume {
     }
 }
 
+/// Defense in depth at the final rendering boundary. In particular, deleting an
+/// fsGroup after ordinary resolution would hide inherited unsafe configuration;
+/// it must have been rejected by the compatibility resolver instead.
+fn validate_publication(inputs: &MoverJobInputs<'_>) -> Result<bool, BuildJobError> {
+    let guarded = matches!(&inputs.work_spec.operation,
+        Operation::Snapshot(op) if op.require_read_only_source);
+    let split = inputs.source_volume.as_ref().is_some_and(|source| {
+        !source.pvc_publication_read_only && source.container_mount_read_only
+    });
+    let fail = |message: &str| BuildJobError::UnsafePublication(message.into());
+    if guarded != split {
+        return Err(fail(
+            "RW publication + RO mount requires the Snapshot runtime guard, and vice versa",
+        ));
+    }
+    if inputs.cache_ownership.is_some() && (!split || inputs.cache_volume != CacheVolume::EmptyDir)
+    {
+        return Err(fail(
+            "cache ownership initialization initially requires compatibility mode and an ordinary emptyDir",
+        ));
+    }
+    if !split {
+        return Ok(false);
+    }
+    let source = inputs
+        .source_volume
+        .as_ref()
+        .expect("split requires source");
+    crate::source_guard::validate_source_mount_path(std::path::Path::new(&source.mount_path))
+        .map_err(|error| fail(&error.to_string()))?;
+    if !matches!(&source.source, MountSource::Pvc { .. })
+        || inputs.repo_volume.is_some()
+        || inputs.scratch_volume.is_some()
+        || inputs.cache_volume != CacheVolume::EmptyDir
+        || !matches!(
+            &inputs.work_spec.repository,
+            RepositoryConnect::S3 { .. }
+                | RepositoryConnect::Gcs { .. }
+                | RepositoryConnect::Azure { .. }
+                | RepositoryConnect::B2 { .. }
+        )
+    {
+        return Err(fail(
+            "compatibility mode requires one PVC source, object storage, ordinary emptyDir cache, and no repository/scratch mounts",
+        ));
+    }
+    let Operation::Snapshot(op) = &inputs.work_spec.operation else {
+        return Err(fail("compatibility mode only supports Snapshot operations"));
+    };
+    if op.stdin.is_some()
+        || !std::path::Path::new(&op.source_path).starts_with(&source.mount_path)
+        || !std::path::Path::new(&source.mount_path).is_absolute()
+        || std::path::Path::new(&source.mount_path)
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(fail(
+            "snapshot must read a filesystem path inside the guarded absolute PVC mount",
+        ));
+    }
+    let psc = inputs.pod_security_context.as_ref();
+    let sc = &inputs.security_context;
+    if let Some(error) =
+        kopiur_api::validate::validate_rw_publication_security_context(sc, psc).first()
+    {
+        return Err(fail(&error.to_string()));
+    }
+    if let Some(target) = inputs.cache_ownership {
+        let uid = kopiur_api::common::effective_run_as_user(Some(sc), psc)
+            .unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
+        let gid = kopiur_api::common::effective_run_as_group(Some(sc), psc)
+            .unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
+        if target.uid == 0 || i64::from(target.uid) != uid || i64::from(target.gid) != gid {
+            return Err(fail(
+                "cache ownership target must match the effective non-root mover UID/GID",
+            ));
+        }
+    }
+    Ok(true)
+}
+
+fn cache_init_container(inputs: &MoverJobInputs<'_>, target: CacheOwnershipTarget) -> Container {
+    use k8s_openapi::api::core::v1::{Capabilities, SeccompProfile};
+    Container {
+        name: "cache-init".into(),
+        image: Some(inputs.image.into()),
+        image_pull_policy: inputs.image_pull_policy.map(str::to_owned),
+        args: Some(vec![
+            "cache-init".into(),
+            "--uid".into(),
+            target.uid.to_string(),
+            "--gid".into(),
+            target.gid.to_string(),
+        ]),
+        // Deliberately no env/envFrom, source/config/repository mounts, or shell.
+        volume_mounts: Some(vec![VolumeMount {
+            name: "kopia-cache".into(),
+            mount_path: kopiur_kopia::env::DEFAULT_CACHE_DIR.into(),
+            ..Default::default()
+        }]),
+        security_context: Some(SecurityContext {
+            run_as_user: Some(0),
+            run_as_group: Some(0),
+            run_as_non_root: Some(false),
+            allow_privilege_escalation: Some(false),
+            read_only_root_filesystem: Some(true),
+            capabilities: Some(Capabilities {
+                drop: Some(vec!["ALL".into()]),
+                // Chmod while still root-owned, then fchown the opened root.
+                // No DAC_OVERRIDE/FOWNER: reused/unsafe cache roots fail closed.
+                add: Some(vec!["CHOWN".into()]),
+            }),
+            seccomp_profile: Some(SeccompProfile {
+                type_: "RuntimeDefault".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Build the mover `Job` that carries the serialized work spec INLINE in its
 /// pod env ([`WORK_SPEC_ENV`]) and runs the kopiur-mover image.
 /// `restartPolicy: Never`; backoff/deadline from limits.
@@ -515,6 +672,7 @@ fn cache_volume_source(cache: &CacheVolume) -> Volume {
 /// the full controller→mover contract in one `kubectl get job -o yaml`.
 /// Refuses a spec over [`MAX_WORK_SPEC_BYTES`] with an actionable error.
 pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
+    let compatibility = validate_publication(inputs)?;
     let work_spec_json = serde_json::to_string(inputs.work_spec)?;
     if work_spec_json.len() > MAX_WORK_SPEC_BYTES {
         return Err(BuildJobError::TooLarge {
@@ -530,6 +688,65 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
     // PVC (read-write, filesystem backend); the work spec needs none (env).
     let mut volumes = vec![];
     let mut volume_mounts = vec![];
+
+    if compatibility {
+        use k8s_openapi::api::core::v1::{
+            ConfigMapProjection, DownwardAPIProjection, DownwardAPIVolumeFile, KeyToPath,
+            ObjectFieldSelector, ProjectedVolumeSource, ServiceAccountTokenProjection,
+            VolumeProjection,
+        };
+        // Disable automatic token injection below: otherwise the ServiceAccount
+        // admission plugin would also mount credentials into cache-init. Keep
+        // the main mover's existing status API access with an explicit projection.
+        volumes.push(Volume {
+            name: "kopiur-api-access".into(),
+            projected: Some(ProjectedVolumeSource {
+                default_mode: Some(0o644),
+                sources: Some(vec![
+                    VolumeProjection {
+                        service_account_token: Some(ServiceAccountTokenProjection {
+                            path: "token".into(),
+                            expiration_seconds: Some(3600),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    VolumeProjection {
+                        config_map: Some(ConfigMapProjection {
+                            name: "kube-root-ca.crt".into(),
+                            items: Some(vec![KeyToPath {
+                                key: "ca.crt".into(),
+                                path: "ca.crt".into(),
+                                ..Default::default()
+                            }]),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    VolumeProjection {
+                        downward_api: Some(DownwardAPIProjection {
+                            items: Some(vec![DownwardAPIVolumeFile {
+                                path: "namespace".into(),
+                                field_ref: Some(ObjectFieldSelector {
+                                    field_path: "metadata.namespace".into(),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }]),
+                        }),
+                        ..Default::default()
+                    },
+                ]),
+            }),
+            ..Default::default()
+        });
+        volume_mounts.push(VolumeMount {
+            name: "kopiur-api-access".into(),
+            mount_path: "/var/run/secrets/kubernetes.io/serviceaccount".into(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+    }
 
     // Writable cache/logs/config for kopia. kopia defaults these under $HOME,
     // which is /nonexistent on distroless:nonroot; without this volume (and the
@@ -667,6 +884,17 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
         name: "mover".to_string(),
         image: Some(inputs.image.to_string()),
         image_pull_policy: inputs.image_pull_policy.map(str::to_string),
+        args: compatibility.then(|| {
+            vec![
+                REQUIRED_READ_ONLY_SOURCE_ARG.into(),
+                inputs
+                    .source_volume
+                    .as_ref()
+                    .expect("validated source")
+                    .mount_path
+                    .clone(),
+            ]
+        }),
         env: Some(env),
         env_from,
         volume_mounts: Some(volume_mounts),
@@ -679,8 +907,12 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
     let pod_spec = PodSpec {
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
+        init_containers: inputs
+            .cache_ownership
+            .map(|target| vec![cache_init_container(inputs, target)]),
         volumes: Some(volumes),
         service_account_name: inputs.service_account.map(str::to_string),
+        automount_service_account_token: compatibility.then_some(false),
         // Pod-level securityContext (e.g. fsGroup) so an unprivileged mover can write
         // a freshly-provisioned restore volume. `None` leaves the pod spec minimal.
         security_context: inputs.pod_security_context.clone(),
@@ -691,6 +923,24 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
         ..Default::default()
     };
 
+    let mut labels = job_and_pod_labels(inputs);
+    let mut job_annotations = inputs.annotations.clone();
+    let mut pod_annotations = inputs.pod_annotations.clone().unwrap_or_default();
+    if compatibility {
+        labels.insert(RW_PUBLICATION_LABEL.into(), "true".into());
+        // Well-known mesh/vault injection opt-outs. Admission must also validate
+        // the final Pod, because an arbitrary webhook may ignore these hints.
+        labels.insert("sidecar.istio.io/inject".into(), "false".into());
+        for (key, value) in [
+            ("sidecar.istio.io/inject", "false"),
+            ("linkerd.io/inject", "disabled"),
+            ("consul.hashicorp.com/connect-inject", "false"),
+            ("vault.hashicorp.com/agent-inject", "false"),
+        ] {
+            job_annotations.insert(key.into(), value.into());
+            pod_annotations.insert(key.into(), value.into());
+        }
+    }
     Ok(Job {
         metadata: ObjectMeta {
             name: Some(inputs.name.to_string()),
@@ -698,8 +948,8 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
             // moverDefaults.podLabels ride the Job too (selector ergonomics);
             // podAnnotations deliberately do NOT — the Job keeps exactly the
             // caller's own annotations.
-            labels: Some(job_and_pod_labels(inputs)),
-            annotations: (!inputs.annotations.is_empty()).then(|| inputs.annotations.clone()),
+            labels: Some(labels.clone()),
+            annotations: (!job_annotations.is_empty()).then_some(job_annotations),
             owner_references: Some(vec![inputs.owner.clone()]),
             ..Default::default()
         },
@@ -716,16 +966,12 @@ pub fn build_job(inputs: &MoverJobInputs<'_>) -> Result<Job, BuildJobError> {
             ttl_seconds_after_finished: inputs.limits.ttl_seconds_after_finished.map(|t| t as i32),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(job_and_pod_labels(inputs)),
+                    labels: Some(labels),
                     // moverDefaults.podAnnotations land HERE and nowhere else:
                     // a mesh/injection webhook only reads the pod. Absent or
                     // empty stays UNSET (not `Some({})`) so a Job built without
                     // podAnnotations serializes byte-identically to before.
-                    annotations: inputs
-                        .pod_annotations
-                        .as_ref()
-                        .filter(|a| !a.is_empty())
-                        .cloned(),
+                    annotations: (!pod_annotations.is_empty()).then_some(pod_annotations),
                     ..Default::default()
                 }),
                 spec: Some(pod_spec),
@@ -911,6 +1157,7 @@ mod tests {
         MoverWorkSpec {
             version: 1,
             operation: Operation::Snapshot(SnapshotOp {
+                require_read_only_source: false,
                 stdin: None,
                 source_path: "/data".into(),
                 tags: BTreeMap::new(),
@@ -974,8 +1221,336 @@ mod tests {
             extra_env: Vec::new(),
             annotations: Default::default(),
             cache_volume: CacheVolume::EmptyDir,
+            cache_ownership: None,
             scratch_volume: None,
             readiness_exec: None,
+        }
+    }
+
+    fn compatibility_work_spec() -> MoverWorkSpec {
+        let mut ws = sample_work_spec();
+        if let Operation::Snapshot(op) = &mut ws.operation {
+            op.require_read_only_source = true;
+        }
+        ws.repository = RepositoryConnect::Gcs {
+            bucket: "test".into(),
+            prefix: None,
+        };
+        ws
+    }
+
+    fn compatibility_inputs(ws: &MoverWorkSpec) -> MoverJobInputs<'_> {
+        let mut i = inputs(ws, JobLimits::default());
+        i.source_volume = Some(VolumeMountSpec::pvc_with_publication(
+            "data", "/data", false, true,
+        ));
+        i.pod_security_context = Some(PodSecurityContext::default());
+        i
+    }
+
+    #[test]
+    fn rw_publication_renders_ro_process_mount_without_fs_group() {
+        let ws = compatibility_work_spec();
+        let mut i = compatibility_inputs(&ws);
+        i.pod_annotations = Some(BTreeMap::from([(
+            "sidecar.istio.io/inject".into(),
+            "true".into(),
+        )]));
+        let job = build_job(&i).unwrap();
+        assert_eq!(
+            job.metadata.labels.as_ref().unwrap()[RW_PUBLICATION_LABEL],
+            "true"
+        );
+        let template = job.spec.unwrap().template;
+        assert_eq!(
+            template.metadata.unwrap().annotations.unwrap()["sidecar.istio.io/inject"],
+            "false"
+        );
+        let pod = template.spec.unwrap();
+        assert!(pod.security_context.as_ref().unwrap().fs_group.is_none());
+        assert!(
+            pod.security_context
+                .as_ref()
+                .unwrap()
+                .fs_group_change_policy
+                .is_none()
+        );
+        assert_eq!(pod.automount_service_account_token, Some(false));
+        assert!(pod.init_containers.is_none());
+        assert_eq!(pod.containers.len(), 1);
+        assert_eq!(
+            pod.containers[0].args.as_ref().unwrap(),
+            &vec![REQUIRED_READ_ONLY_SOURCE_ARG.to_string(), "/data".into()]
+        );
+        let source = pod
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "source")
+            .unwrap();
+        assert_eq!(
+            source.persistent_volume_claim.as_ref().unwrap().read_only,
+            Some(false)
+        );
+        let mount = pod.containers[0]
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|m| m.name == "source")
+            .unwrap();
+        assert_eq!(mount.read_only, Some(true));
+        assert!(mount.mount_propagation.is_none());
+        assert!(pod.host_network.is_none());
+        assert!(pod.host_pid.is_none());
+        assert!(
+            pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.host_path.is_none())
+        );
+    }
+
+    #[test]
+    fn rw_publication_final_builder_refuses_unsafe_inputs() {
+        let ws = compatibility_work_spec();
+        for field in [
+            "fsGroup",
+            "fsGroupChangePolicy",
+            "privileged",
+            "caps",
+            "nonroot",
+            "escalation",
+            "seccomp",
+            "ephemeral",
+            "persistent",
+            "nfs",
+            "rwMount",
+            "repo",
+            "uidMismatch",
+        ] {
+            let mut i = compatibility_inputs(&ws);
+            match field {
+                "fsGroup" => i.pod_security_context.as_mut().unwrap().fs_group = Some(1000),
+                "fsGroupChangePolicy" => {
+                    i.pod_security_context
+                        .as_mut()
+                        .unwrap()
+                        .fs_group_change_policy = Some("OnRootMismatch".into())
+                }
+                "privileged" => i.security_context.privileged = Some(true),
+                "caps" => {
+                    i.security_context.capabilities.as_mut().unwrap().add =
+                        Some(vec!["SYS_ADMIN".into()])
+                }
+                "nonroot" => i.security_context.run_as_non_root = Some(false),
+                "escalation" => i.security_context.allow_privilege_escalation = Some(true),
+                "seccomp" => {
+                    i.security_context.seccomp_profile.as_mut().unwrap().type_ = "Unconfined".into()
+                }
+                "ephemeral" => {
+                    i.cache_volume = CacheVolume::Ephemeral {
+                        capacity: "1Gi".into(),
+                        storage_class: None,
+                    }
+                }
+                "persistent" => {
+                    i.cache_volume = CacheVolume::Pvc {
+                        claim_name: "cache".into(),
+                    }
+                }
+                "nfs" => {
+                    i.source_volume.as_mut().unwrap().source = MountSource::Nfs {
+                        server: "nfs".into(),
+                        path: "/data".into(),
+                    }
+                }
+                "rwMount" => i.source_volume.as_mut().unwrap().container_mount_read_only = false,
+                "repo" => i.repo_volume = Some(VolumeMountSpec::pvc("repo", "/repo", false)),
+                "uidMismatch" => {
+                    i.cache_ownership = Some(CacheOwnershipTarget {
+                        uid: 1000,
+                        gid: 1000,
+                    })
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(build_job(&i), Err(BuildJobError::UnsafePublication(_))),
+                "must refuse {field}"
+            );
+        }
+        let mut unguarded = compatibility_work_spec();
+        if let Operation::Snapshot(op) = &mut unguarded.operation {
+            op.require_read_only_source = false;
+        }
+        assert!(build_job(&compatibility_inputs(&unguarded)).is_err());
+        let mut filesystem = compatibility_work_spec();
+        filesystem.repository = RepositoryConnect::Filesystem {
+            path: "/repo".into(),
+        };
+        assert!(build_job(&compatibility_inputs(&filesystem)).is_err());
+    }
+
+    #[test]
+    fn cache_initializer_mounts_only_cache_and_targets_resolved_identity() {
+        let ws = compatibility_work_spec();
+        let mut i = compatibility_inputs(&ws);
+        i.security_context.run_as_user = Some(1000);
+        i.pod_security_context.as_mut().unwrap().run_as_group = Some(2000);
+        i.pod_security_context.as_mut().unwrap().supplemental_groups = Some(vec![3000]);
+        i.cache_ownership = Some(CacheOwnershipTarget {
+            uid: 1000,
+            gid: 2000,
+        });
+        i.creds_secrets = vec![CredsEnvFrom::plain("repository-secret-name")];
+        let job = build_job(&i).unwrap();
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        let init = &pod.init_containers.as_ref().unwrap()[0];
+        assert_eq!(init.image, pod.containers[0].image);
+        assert_eq!(
+            init.args.as_ref().unwrap(),
+            &["cache-init", "--uid", "1000", "--gid", "2000"]
+        );
+        let mounts = init.volume_mounts.as_ref().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].name, "kopia-cache");
+        assert_eq!(mounts[0].mount_path, kopiur_kopia::env::DEFAULT_CACHE_DIR);
+        assert!(init.env.is_none() && init.env_from.is_none());
+        assert!(init.lifecycle.is_none());
+        assert_eq!(
+            init.security_context
+                .as_ref()
+                .unwrap()
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .add
+                .as_ref()
+                .unwrap(),
+            &["CHOWN"]
+        );
+        assert_eq!(
+            init.security_context
+                .as_ref()
+                .unwrap()
+                .allow_privilege_escalation,
+            Some(false)
+        );
+        assert_eq!(pod.automount_service_account_token, Some(false));
+        assert!(
+            pod.containers[0]
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.name == "kopiur-api-access")
+        );
+        assert_eq!(
+            pod.security_context.unwrap().supplemental_groups,
+            Some(vec![3000])
+        );
+    }
+
+    /// Feed the actual renderer output to the actual emitted admission CEL.
+    /// Handwritten API fixtures alone cannot catch renderer/defaulting drift in
+    /// token projections, optional fields, and the cache-init security contract.
+    fn rendered_admission_denials(object: serde_json::Value, namespace_gate: bool) -> Vec<String> {
+        use cel::{Context, Program, Value};
+        use std::collections::HashMap;
+        let resource = if object["kind"] == "Job" {
+            "jobs"
+        } else {
+            "pods"
+        };
+        let mut context = Context::default();
+        context.add_variable("object", object).unwrap();
+        context
+            .add_variable("oldObject", serde_json::Value::Null)
+            .unwrap();
+        context
+            .add_variable(
+                "request",
+                serde_json::json!({"resource": {"resource": resource}}),
+            )
+            .unwrap();
+        context
+            .add_variable(
+                "namespaceObject",
+                serde_json::json!({"metadata": {"annotations": {
+                    kopiur_api::consts::PRIVILEGED_MOVERS_ANNOTATION: namespace_gate.to_string()
+                }}}),
+            )
+            .unwrap();
+        let spec = kopiur_api::rw_publication_admission::policy().spec.unwrap();
+        for condition in spec.match_conditions.unwrap() {
+            match Program::compile(&condition.expression)
+                .unwrap()
+                .execute(&context)
+            {
+                Ok(Value::Bool(true)) => {}
+                Ok(Value::Bool(false)) => return vec![],
+                other => return vec![format!("match failed closed: {other:?}")],
+            }
+        }
+        let mut variables: HashMap<String, Value> = HashMap::new();
+        for variable in spec.variables.unwrap() {
+            context.add_variable_from_value("variables", variables.clone());
+            match Program::compile(&variable.expression)
+                .unwrap()
+                .execute(&context)
+            {
+                Ok(value) => {
+                    variables.insert(variable.name, value);
+                }
+                Err(error) => return vec![format!("{} failed closed: {error:?}", variable.name)],
+            }
+        }
+        context.add_variable_from_value("variables", variables);
+        spec.validations
+            .unwrap()
+            .into_iter()
+            .filter_map(|validation| {
+                let result = Program::compile(&validation.expression)
+                    .unwrap()
+                    .execute(&context);
+                (result != Ok(Value::Bool(true)))
+                    .then(|| format!("{}: {result:?}", validation.message.unwrap()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn actual_rendered_jobs_and_pods_satisfy_mandatory_admission() {
+        for initializer in [false, true] {
+            let ws = compatibility_work_spec();
+            let mut i = compatibility_inputs(&ws);
+            if initializer {
+                i.security_context.run_as_user = Some(1000);
+                i.security_context.run_as_group = Some(2000);
+                i.cache_ownership = Some(CacheOwnershipTarget {
+                    uid: 1000,
+                    gid: 2000,
+                });
+            }
+            let job = serde_json::to_value(build_job(&i).unwrap()).unwrap();
+            let pod = serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": job["spec"]["template"]["metadata"],
+                "spec": job["spec"]["template"]["spec"],
+            });
+            for rendered in [job, pod] {
+                assert!(
+                    rendered_admission_denials(rendered.clone(), true).is_empty(),
+                    "{:?}",
+                    rendered_admission_denials(rendered.clone(), true)
+                );
+                if initializer {
+                    assert!(!rendered_admission_denials(rendered, false).is_empty());
+                }
+            }
         }
     }
 
@@ -1394,11 +1969,8 @@ mod tests {
         assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
     }
 
-    /// #254: one `VolumeMountSpec.read_only` must drive BOTH Kubernetes fields. They are
-    /// separate knobs — `PersistentVolumeClaimVolumeSource.readOnly` on the volume and
-    /// `VolumeMount.readOnly` on the container — and the kubelet declines to apply
-    /// `fsGroup` if either says read-only. Setting one and missing the other yields a
-    /// mount that looks writable and still silently skips the chgrp.
+    /// #254: legacy writable sources still set BOTH Kubernetes fields false.
+    /// Explicit compatibility publication must never reinterpret readOnly:false.
     #[test]
     fn a_writable_source_is_writable_on_both_the_volume_and_the_mount() {
         let ws = sample_work_spec();

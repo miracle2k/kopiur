@@ -36,6 +36,9 @@ pub(super) fn build_backup_run(
     _name: &str,
 ) -> Result<SnapshotRun<'static>> {
     let pin = backup.spec.source.as_ref();
+    if kopiur_api::snapshot_policy::policy_requests_rw_publication(&config.spec) {
+        super::publication::validate_source_pin(config, pin, namespace)?;
+    }
     let identity = resolve_identity_for(config, namespace, repo.identity_defaults.as_ref(), pin)?;
 
     // Which source this run covers: the pinned one for a fanned-out child of a
@@ -49,11 +52,10 @@ pub(super) fn build_backup_run(
         .ok_or_else(|| Error::Invariant("SnapshotPolicy has no sources".into()))?;
     let strategy = crate::expand::strategy_for(source);
 
-    // Read-only unless the recipe opts out. kopia only reads the source, so the mount
-    // is read-only by default; `readOnly: false` exists solely so the kubelet will
-    // apply `fsGroup` (it skips its recursive chgrp on a read-only mount). Admission
-    // rejects the combinations where that cannot work or would rewrite live data
-    // unacknowledged — see `validate_source`/`validate_backup_config`.
+    // Logical access stays read-only unless the recipe opts out. Publication
+    // defaults to this same value for legacy policies. The explicit compatibility
+    // mode alone separates RW CSI publication from RO process access; its launch
+    // path rejects all effective fsGroup settings rather than modifying the source.
     let read_only = eff.read_only;
 
     // The mover snapshots whatever is mounted at `source_path`, so the mount path
@@ -101,7 +103,12 @@ pub(super) fn build_backup_run(
                     .unwrap_or_else(|| format!("/pvc/{}", pvc.name));
                 (
                     path.clone(),
-                    Some(VolumeMountSpec::pvc(pvc.name.clone(), path, read_only)),
+                    Some(VolumeMountSpec::pvc_with_publication(
+                        pvc.name.clone(),
+                        path,
+                        kopiur_api::snapshot_policy::source_pvc_publication_read_only(source),
+                        read_only,
+                    )),
                     None,
                 )
             }
@@ -167,6 +174,9 @@ pub(super) fn build_backup_run(
     let work_spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Snapshot(SnapshotOp {
+            require_read_only_source: kopiur_api::snapshot_policy::policy_requests_rw_publication(
+                &config.spec,
+            ),
             source_path: source_path.clone(),
             stdin,
             tags: tags_for(backup, config),
@@ -208,7 +218,8 @@ pub(super) fn build_backup_run(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
 
     Ok((work_spec, source_volume, repo_volume, creds_secrets))

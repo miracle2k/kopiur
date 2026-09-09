@@ -197,6 +197,11 @@ pub struct SnapshotOp {
     /// artifact under (e.g. `/stream/postgres.sql`); nothing is read from the pod's
     /// filesystem.
     pub source_path: String,
+    /// Direct RW-publication compatibility mode must verify the kernel mount
+    /// is read-only before invoking Kopia. Independently bound to the source
+    /// mount by the Job's `--require-read-only-source` argument.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_read_only_source: bool,
     /// Present ⇒ this run's bytes come from a command's stdout rather than from a
     /// mounted path. Read it through [`snapshot_input`], which turns it into the
     /// exhaustively-matched [`SnapshotInput`]. `#[serde(default)]` so work-spec JSON
@@ -2345,6 +2350,7 @@ impl Default for MoverOptions {
 /// let spec = MoverWorkSpec {
 ///     version: 1,
 ///     operation: Operation::Snapshot(SnapshotOp {
+///         require_read_only_source: false,
 ///         stdin: None,
 ///         source_path: "/data".into(),
 ///         tags: BTreeMap::new(),

@@ -1167,7 +1167,8 @@ async fn spawn_snapshot_replication_job(
         io::filesystem_repo_mount_source(&source.backend).map(|mount_source| VolumeMountSpec {
             source: mount_source,
             mount_path: io::filesystem_repo_path(&source.backend).unwrap_or_default(),
-            read_only: true,
+            pvc_publication_read_only: true,
+            container_mount_read_only: true,
         });
     // A filesystem DESTINATION needs its volume mounted read-write — `kopia
     // snapshot migrate` writes the copies into it. Carried in the
@@ -1180,7 +1181,8 @@ async fn spawn_snapshot_replication_job(
         io::filesystem_repo_mount_source(&dest.backend).map(|mount_source| VolumeMountSpec {
             source: mount_source,
             mount_path: io::filesystem_repo_path(&dest.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     let owner = io::owner_ref_for(repl, "SnapshotReplication")?;
 
@@ -1209,6 +1211,7 @@ async fn spawn_snapshot_replication_job(
     };
 
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: job_name,
         namespace,
         owner,

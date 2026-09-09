@@ -964,7 +964,8 @@ fn seed_source_volume(backend: &Backend) -> Option<VolumeMountSpec> {
     filesystem_repo_mount_source(backend).map(|source| VolumeMountSpec {
         source,
         mount_path: filesystem_repo_path(backend).unwrap_or_default(),
-        read_only: true,
+        pvc_publication_read_only: true,
+        container_mount_read_only: true,
     })
 }
 

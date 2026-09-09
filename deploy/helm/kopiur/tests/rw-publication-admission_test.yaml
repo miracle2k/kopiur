@@ -1,0 +1,36 @@
+suite: RW-publication admission protection
+templates:
+  - rw-publication-admission.tpl
+tests:
+  - it: preserves existing installation scope by default
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: installs the mandatory fail-closed policy and Deny binding when explicitly enabled
+    set:
+      rwPublicationAdmission.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: ValidatingAdmissionPolicy
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: kopiur-rw-publication
+        documentIndex: 0
+      - equal:
+          path: spec.failurePolicy
+          value: Fail
+        documentIndex: 0
+      - isKind:
+          of: ValidatingAdmissionPolicyBinding
+        documentIndex: 1
+      - equal:
+          path: spec.policyName
+          value: kopiur-rw-publication
+        documentIndex: 1
+      - equal:
+          path: spec.validationActions
+          value: [Deny]
+        documentIndex: 1

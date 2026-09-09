@@ -2682,7 +2682,8 @@ async fn run_restore_mover(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: true,
+            pvc_publication_read_only: true,
+            container_mount_read_only: true,
         });
     // Resolve the cache VOLUME; a persistent cache PVC is owned by this Restore.
     let cache_volume = crate::cache::resolve_cache_volume(
@@ -2737,6 +2738,7 @@ async fn run_restore_mover(
         }
     };
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: job_name,
         namespace,
         owner,

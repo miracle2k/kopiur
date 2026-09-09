@@ -1,5 +1,9 @@
 # Copy methods: `Snapshot`, `Clone`, `Direct`
 
+For drivers that reject a second same-node RO PVC publication while accepting
+RW, see the explicit [Direct PVC RW-publication compatibility mode](direct-pvc-rw-publication.md).
+It keeps the mover mount read-only and forbids effective Pod ownership changes.
+
 `SnapshotPolicy.spec.copyMethod` chooses **how Kopiur captures your data before kopia reads it**. Kopia always backs up files from a mounted volume — the copy method only decides *which* volume the backup mover mounts:
 
 | Method | What the mover reads | Point-in-time? | Decoupled from the app's node? | Requires |

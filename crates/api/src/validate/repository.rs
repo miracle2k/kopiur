@@ -676,6 +676,11 @@ pub fn validate_repository(spec: &RepositorySpec) -> Vec<ValidationError> {
     }
     if let Some(md) = &spec.mover_defaults {
         errs.extend(validate_pod_metadata(md));
+        if let Err(e) =
+            validate_cache_ownership_scope(md.cache.as_ref(), "spec.moverDefaults.cache")
+        {
+            errs.push(e);
+        }
     }
     // #380: `spec.seed` rules derivable from the spec alone. The namespaced arm
     // of the co-resident seed-Secret rule and the migrate-mode self-reference
@@ -1409,6 +1414,11 @@ pub fn validate_cluster_repository(spec: &ClusterRepositorySpec) -> Vec<Validati
     }
     if let Some(md) = &spec.mover_defaults {
         errs.extend(validate_pod_metadata(md));
+        if let Err(e) =
+            validate_cache_ownership_scope(md.cache.as_ref(), "spec.moverDefaults.cache")
+        {
+            errs.push(e);
+        }
     }
     // #380: same seed rules, cluster arm — a ClusterRepository's seed-source
     // Secret must not pin a namespace (its movers resolve credentials in the

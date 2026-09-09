@@ -11,6 +11,18 @@ pub enum CacheVolumeMode {
     Persistent,
 }
 
+/// Optional preparation of the mover's cache root, independent of Pod fsGroup.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
+pub enum CacheOwnership {
+    /// Use the Kopiur mover image to prepare only the emptyDir cache root for the
+    /// effective mover UID/GID. The short-lived initializer mounts only the cache,
+    /// never source/restore volumes or repository credentials. It runs as root with
+    /// only CHOWN and requires the existing namespace privileged-mover opt-in.
+    /// Initially supported only for Direct PVC RW-publication compatibility movers
+    /// with an ordinary emptyDir; ephemeral PVC and persistent caches are excluded.
+    InitContainer,
+}
+
 /// kopia cache defaults inherited by every mover unless overridden per-recipe.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +42,12 @@ pub struct CacheDefaults {
     /// How the cache volume is provisioned (`Ephemeral` default, or `Persistent`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<CacheVolumeMode>,
+    /// Opt-in cache-root ownership preparation. Absent means no initializer.
+    /// `InitContainer` requires a namespace explicitly permitting privileged movers
+    /// and is initially supported only with an emptyDir cache in Direct PVC
+    /// RW-publication compatibility mode. It never uses Pod fsGroup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<CacheOwnership>,
 }
 
 impl CacheDefaults {
@@ -54,6 +72,7 @@ impl CacheDefaults {
                 metadata_cache_size_mb: o.metadata_cache_size_mb.or(b.metadata_cache_size_mb),
                 content_cache_size_mb: o.content_cache_size_mb.or(b.content_cache_size_mb),
                 mode: o.mode.or(b.mode),
+                ownership: o.ownership.or(b.ownership),
             }),
         }
     }
@@ -61,6 +80,19 @@ impl CacheDefaults {
     /// The provisioning mode, defaulting to `Ephemeral` when unset.
     pub fn effective_mode(&self) -> CacheVolumeMode {
         self.mode.unwrap_or_default()
+    }
+
+    /// The initial compatibility-mode cache support boundary: no PVC lifecycle or
+    /// existing cache contents to chown. An absent cache also renders an emptyDir.
+    pub fn is_ordinary_empty_dir(&self) -> bool {
+        self.effective_mode() == CacheVolumeMode::Ephemeral
+            && self.capacity.is_none()
+            && self.storage_class_name.is_none()
+    }
+
+    /// Whether cache preparation needs the privileged-mover namespace gate.
+    pub fn requires_privilege(&self) -> bool {
+        self.ownership == Some(CacheOwnership::InitContainer)
     }
 }
 

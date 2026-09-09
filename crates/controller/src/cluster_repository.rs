@@ -1508,7 +1508,8 @@ async fn bootstrap_cluster_via_mover(
         io::filesystem_repo_mount_source(backend).map(|source| jobs::VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     // spec.bootstrap.failurePolicy lets callers raise the deadline for a slow
     // backend or tune the retry budget; unset keeps the built-in defaults.
@@ -1518,6 +1519,7 @@ async fn bootstrap_cluster_via_mover(
         .as_ref()
         .and_then(|b| b.failure_policy.as_ref());
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: &job_name,
         namespace: &job_ns,
         owner,

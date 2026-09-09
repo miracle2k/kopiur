@@ -51,7 +51,8 @@ impl MoverSpec {
     /// Whether this mover requests **elevated privileges** that the workload
     /// namespace must explicitly opt into (ADR §4.11/§G16). True when
     /// `privilegedMode` is set, or the `securityContext` runs as root / privileged
-    /// / with escalation / with added Linux capabilities.
+    /// / with escalation / with added Linux capabilities, or cache ownership uses
+    /// a root init container. The latter never grants privileges to the main mover.
     ///
     /// The rationale is the same as VolSync's `privileged-movers` model: the
     /// controller mints a mover `ServiceAccount` in the workload namespace, and a
@@ -64,7 +65,10 @@ impl MoverSpec {
             self.security_context.as_ref(),
             self.pod_security_context.as_ref(),
             self.privileged_mode,
-        )
+        ) || self
+            .cache
+            .as_ref()
+            .is_some_and(CacheDefaults::requires_privilege)
     }
 }
 
@@ -280,12 +284,60 @@ pub fn resolve_mover(
     // fsGroup that makes the cache writable. Both are always present, so every mover pod
     // — bootstrap, backup, restore, maintenance, verification, replication — carries the
     // hardened defaults unless a higher layer overrides them.
-    let hardened_sc = hardened_security_context();
     let hardened_psc = hardened_pod_security_context();
+    resolve_mover_with_pod_baseline(
+        defaults,
+        recipe_sc,
+        recipe_psc,
+        recipe_resources,
+        recipe_cache,
+        recipe_ttl_seconds_after_finished,
+        &hardened_psc,
+    )
+}
+
+/// Resolve a Direct PVC RW-publication compatibility mover with an EMPTY pod
+/// security-context baseline, retaining ordinary hardened container defaults.
+///
+/// A writable CSI publication allows kubelet to apply Pod fsGroup to the live
+/// source before the mover starts. Consequently, this resolver must start without
+/// fsGroup; it must never resolve a normal mover and silently delete ownership
+/// settings afterward. Repository, inherited, and explicit settings merge normally
+/// and remain visible so the caller can reject every effective fsGroup or
+/// fsGroupChangePolicy before creating a Job.
+pub fn resolve_mover_for_rw_publication(
+    defaults: Option<&MoverDefaults>,
+    recipe_sc: Option<&SecurityContext>,
+    recipe_psc: Option<&PodSecurityContext>,
+    recipe_resources: Option<&ResourceRequirements>,
+    recipe_cache: Option<&CacheDefaults>,
+    recipe_ttl_seconds_after_finished: Option<i64>,
+) -> ResolvedMover {
+    resolve_mover_with_pod_baseline(
+        defaults,
+        recipe_sc,
+        recipe_psc,
+        recipe_resources,
+        recipe_cache,
+        recipe_ttl_seconds_after_finished,
+        &PodSecurityContext::default(),
+    )
+}
+
+fn resolve_mover_with_pod_baseline(
+    defaults: Option<&MoverDefaults>,
+    recipe_sc: Option<&SecurityContext>,
+    recipe_psc: Option<&PodSecurityContext>,
+    recipe_resources: Option<&ResourceRequirements>,
+    recipe_cache: Option<&CacheDefaults>,
+    recipe_ttl_seconds_after_finished: Option<i64>,
+    hardened_psc: &PodSecurityContext,
+) -> ResolvedMover {
+    let hardened_sc = hardened_security_context();
     // hardened ⊂ moverDefaults, as one (container, pod) layer pair.
     let (base_sc, base_psc) = merge_context_pair(
         Some(&hardened_sc),
-        Some(&hardened_psc),
+        Some(hardened_psc),
         defaults.and_then(|d| d.security_context.as_ref()),
         defaults.and_then(|d| d.pod_security_context.as_ref()),
     );

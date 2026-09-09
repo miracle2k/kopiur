@@ -670,7 +670,8 @@ async fn spawn_replication_job(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     // A filesystem DESTINATION needs its volume mounted too — `kopia repository
     // sync-to` writes the mirror into it. Carried in the `source_volume` slot (the Job
@@ -681,7 +682,8 @@ async fn spawn_replication_job(
         io::filesystem_repo_mount_source(&repl.spec.destination).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repl.spec.destination).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     let owner = io::owner_ref_for(repl, "RepositoryReplication")?;
 
@@ -786,6 +788,7 @@ async fn spawn_replication_job(
     };
 
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: job_name,
         namespace,
         owner,

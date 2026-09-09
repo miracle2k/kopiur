@@ -189,6 +189,15 @@ rules:
   - update
   - patch
 - apiGroups:
+  - admissionregistration.k8s.io
+  resourceNames:
+  - kopiur-rw-publication
+  resources:
+  - validatingadmissionpolicies
+  - validatingadmissionpolicybindings
+  verbs:
+  - get
+- apiGroups:
   - ''
   resources:
   - namespaces

@@ -30,4 +30,5 @@ exclude = ["deploy/helm/kopiur/values.schema.json"]
 exclude = [
   "deploy/crds/*.yaml",
   "deploy/helm/kopiur/crds/*.yaml",
+  "deploy/admission/*.yaml",
 ]

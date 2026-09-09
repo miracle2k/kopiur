@@ -729,6 +729,20 @@
       "title": "resources",
       "type": "object"
     },
+    "rwPublicationAdmission": {
+      "description": "Mandatory admission protection for the explicitly opted-in Direct PVC\nRW-publication mode. This installs two cluster-scoped objects and therefore\nrequires cluster-admin installation rights even for namespaced operators.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Install the fail-closed RW-publication ValidatingAdmissionPolicy and Deny binding.\nRequired before any compatibility mover can run; the controller verifies the\ninstalled specs. Disabled by default to preserve existing installation scope.",
+          "title": "enabled",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "title": "rwPublicationAdmission",
+      "type": "object"
+    },
     "securityContext": {
       "properties": {
         "allowPrivilegeEscalation": {

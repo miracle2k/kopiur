@@ -347,7 +347,8 @@ pub struct Source {
     /// command in a running workload Pod and streams its stdout straight into kopia.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<StreamSource>,
-    /// Mount the source read-only (default `true`; kopia only ever reads it).
+    /// Mount the source read-only inside the mover container (default `true`).
+    /// Also controls PVC publication unless `pvcPublicationReadOnly` is explicitly set.
     ///
     /// Set `false` **only** to make `fsGroup` work on the source. The kubelet applies
     /// `fsGroup` by recursively `chgrp`-ing the volume and adding group-write — and it
@@ -362,12 +363,35 @@ pub struct Source {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default = "default_source_read_only")]
     pub read_only: Option<bool>,
+    /// Whether CSI publishes the source PVC read-only. When absent, resolves to
+    /// `readOnly`, preserving existing policies exactly; this context-dependent
+    /// default must not be materialized as a constant in the CRD.
+    ///
+    /// Set `false` only for the opt-in Direct PVC RW-publication compatibility mode:
+    /// one literal ReadWriteOnce PVC, `copyMethod: Direct`, `readOnly: true`, and
+    /// `acknowledgeReadWritePublication: true`. The mover's mount remains read-only,
+    /// while CSI receives a writable publication. This accommodates drivers that
+    /// reject a second same-node read-only publication of a live writable PVC.
+    /// Any effective `fsGroup` or `fsGroupChangePolicy` is forbidden because kubelet
+    /// could otherwise recursively rewrite ownership or modes on the live source.
+    /// Effective `seLinuxOptions` or `seLinuxChangePolicy` is also forbidden to
+    /// prevent source relabeling; this mode grants access only through process identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pvc_publication_read_only: Option<bool>,
+    /// Explicitly accepts a writable CSI publication while the mover container's
+    /// source mount stays read-only. Required with `pvcPublicationReadOnly: false`;
+    /// this does not authorize live-source mutation or replace `acknowledgeLiveMutation`.
+    /// CSI publication RW does not grant the mover process write access, but the
+    /// read-only mount is process-level protection, not immutable source storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_read_write_publication: Option<bool>,
     /// Acknowledges that `copyMethod: Direct` + `readOnly: false` lets the kubelet
     /// recursively `chgrp` the **live** volume to the mover's `fsGroup` and make it
     /// group-writable — permanently, while the workload is running. Required for that
     /// combination alone.
     ///
-    /// Ignored (not rejected) otherwise: it is an acknowledgement, never harmful to
+    /// Rejected in RW-publication compatibility mode, where live mutation is forbidden.
+    /// Ignored otherwise: it is an acknowledgement, never harmful to
     /// carry, and rejecting a stale one would make switching `copyMethod` between
     /// `Direct` and `Snapshot`/`Clone` a two-step edit in both directions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -736,8 +760,32 @@ pub fn source_read_only(source: &Source) -> bool {
     source.read_only.unwrap_or(true)
 }
 
-/// Whether this source's mount lets the kubelet rewrite the **live** workload volume:
-/// a writable mount with no staging in front of it.
+/// Whether CSI publishes the source PVC read-only. An absent override follows the
+/// mover mount's logical read-only value, including legacy writable Direct sources.
+pub fn source_pvc_publication_read_only(source: &Source) -> bool {
+    source
+        .pvc_publication_read_only
+        .unwrap_or_else(|| source_read_only(source))
+}
+
+/// Whether a source requests the RW-publication compatibility path, even if its
+/// accompanying fields are invalid. Keep this distinct from "is valid": malformed
+/// opt-ins must reach the restrictive resolver and validators, never a legacy path
+/// that supplies an fsGroup to their writable publication.
+pub fn source_requests_rw_publication(source: &Source) -> bool {
+    source.pvc_publication_read_only == Some(false)
+        || source.acknowledge_read_write_publication == Some(true)
+}
+
+/// Whether any policy source requests the dedicated RW-publication safety path.
+pub fn policy_requests_rw_publication(spec: &SnapshotPolicySpec) -> bool {
+    spec.sources.iter().any(source_requests_rw_publication)
+}
+
+/// Whether a legacy writable source needs the live-volume mutation acknowledgement:
+/// a logically writable mount with no staging in front of it. RW-publication
+/// compatibility instead keeps the logical mount read-only and separately forbids
+/// every effective ownership/relabel setting before the Job exists.
 ///
 /// `copyMethod: Snapshot`/`Clone` interpose a throwaway staged PVC, so the kubelet's
 /// recursive `fsGroup` chgrp lands on a copy that is deleted when the run ends. Only

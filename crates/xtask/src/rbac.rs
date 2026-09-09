@@ -470,6 +470,17 @@ fn metadata(name: &str, namespace: Option<&str>) -> ObjectMeta {
 fn cluster_artifact() -> Result<Artifact> {
     let mut rules = kopia_crd_rules(true);
     rules.extend(workload_rules());
+    // Verify the exact admission guard before any live source is RW-published.
+    // Only the controller can read these two named objects; mover RBAC is unchanged.
+    rules.push(rule_named(
+        &["admissionregistration.k8s.io"],
+        &[
+            "validatingadmissionpolicies".into(),
+            "validatingadmissionpolicybindings".into(),
+        ],
+        &["get"],
+        &[kopiur_api::rw_publication_admission::POLICY_NAME.into()],
+    ));
     // Read Namespaces to check the privileged-movers opt-in annotation (ADR
     // §4.11/§G16). Cluster-scoped resource → cluster install only; a namespaced
     // install can't grant it and the controller fails the check open there.

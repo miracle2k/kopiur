@@ -37,6 +37,7 @@ fn backup_roundtrip() {
     let spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Snapshot(SnapshotOp {
+            require_read_only_source: false,
             stdin: None,
             source_path: "/data".into(),
             tags,
@@ -69,6 +70,7 @@ fn snapshot_op_create_knobs_roundtrip_wire_shape_and_map_to_kopia() {
     // names, and `create_options()` carries them into the kopia client's
     // `SnapshotCreateOptions` unchanged.
     let op = SnapshotOp {
+        require_read_only_source: false,
         stdin: None,
         source_path: "/data".into(),
         tags: BTreeMap::new(),
@@ -104,6 +106,13 @@ fn snapshot_op_old_wire_decodes_with_m4_fields_defaulted() {
         "tags": {"app": "mydb"},
     });
     let op: SnapshotOp = serde_json::from_value(legacy).expect("legacy snapshot op decodes");
+    assert!(!op.require_read_only_source);
+    assert!(
+        serde_json::to_value(&op)
+            .unwrap()
+            .get("requireReadOnlySource")
+            .is_none()
+    );
     assert_eq!(op.fail_fast, None);
     assert_eq!(op.upload_limit_mb, None);
     assert_eq!(op.description, None);
@@ -652,6 +661,7 @@ fn externally_tagged_operation_shape() {
     let spec = MoverWorkSpec {
         version: 1,
         operation: Operation::Snapshot(SnapshotOp {
+            require_read_only_source: false,
             stdin: None,
             source_path: "/data".into(),
             tags: BTreeMap::new(),

@@ -70,6 +70,7 @@ pub fn validate_backup_config(spec: &SnapshotPolicySpec) -> Vec<ValidationError>
             errs.push(e);
         }
     }
+    errs.extend(validate_rw_publication_policy(spec));
     // A CSI volume CLONE has no group counterpart — there is no
     // "VolumeGroupClone" — so `copyMethod: Clone` can only ever capture each PVC
     // independently. Since `groupBy` server-side-defaults to
@@ -197,7 +198,11 @@ pub fn validate_backup_config(spec: &SnapshotPolicySpec) -> Vec<ValidationError>
         ) {
             errs.push(e);
         }
-        if let Err(e) = validate_mover(m, "SnapshotPolicy mover") {
+        if let Err(e) = validate_mover_with_cache_ownership(
+            m,
+            "SnapshotPolicy mover",
+            crate::snapshot_policy::policy_requests_rw_publication(spec),
+        ) {
             errs.push(e);
         }
     }

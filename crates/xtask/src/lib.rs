@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 #![doc = include_str!("../README.md")]
 
+pub mod admission;
 pub mod artifact;
 pub mod crds;
 pub mod dashboards;
@@ -21,11 +22,13 @@ pub fn collect(cmd: &str) -> Result<Vec<Artifact>> {
         "gen-crds" => crds::artifacts()?,
         "gen-rbac" => rbac::artifacts()?,
         "gen-docs" => docs::artifacts()?,
+        "gen-admission" => admission::artifacts()?,
         "gen-all" => {
             let mut v = crds::artifacts()?;
             v.extend(rbac::artifacts()?);
             v.extend(dashboards::artifacts()?);
             v.extend(docs::artifacts()?);
+            v.extend(admission::artifacts()?);
             v
         }
         other => anyhow::bail!("unknown command {other}"),

@@ -621,7 +621,8 @@ async fn spawn_maintenance_job(
         io::filesystem_repo_mount_source(&repo.backend).map(|source| VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(&repo.backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     let owner = io::owner_ref_for(maint, "Maintenance")?;
 
@@ -732,6 +733,7 @@ async fn spawn_maintenance_job(
     }
     mover_identity.decorate_labels(&mut labels);
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: job_name,
         namespace,
         owner,

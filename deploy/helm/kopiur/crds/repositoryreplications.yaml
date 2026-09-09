@@ -546,6 +546,12 @@ spec:
                         - Persistent
                         nullable: true
                         type: string
+                      ownership:
+                        description: Optional preparation of the mover's cache root, independent of Pod fsGroup.
+                        enum:
+                        - InitContainer
+                        nullable: true
+                        type: string
                       storageClassName:
                         description: StorageClass for the cache PVC; absent uses the cluster default.
                         nullable: true

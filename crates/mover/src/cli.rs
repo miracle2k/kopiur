@@ -51,6 +51,11 @@ pub struct MoverCli {
     // never conflict with a subcommand invocation.
     #[arg(long, env = RESULT_CONFIGMAP, global = true)]
     pub result_configmap: Option<String>,
+
+    /// Require a kernel-verified read-only source mount before any Kopia command.
+    /// Rendered independently of the work spec for Direct RW-publication mode.
+    #[arg(long, value_name = "SOURCE_MOUNT")]
+    pub require_read_only_source: Option<PathBuf>,
 }
 
 impl MoverCli {
@@ -72,6 +77,25 @@ impl MoverCli {
 /// specs — renaming a variant breaks running clusters.
 #[derive(Debug, Clone, Subcommand)]
 pub enum MoverCommand {
+    /// Prepare only the fixed cache root. This deliberately gated root init
+    /// container has no source, repository, credential, or work-spec mounts.
+    CacheInit {
+        /// Effective mover UID (must be nonzero).
+        #[arg(long)]
+        uid: u32,
+        /// Effective mover GID.
+        #[arg(long)]
+        gid: u32,
+    },
+    /// Diagnose the actual kernel source mount, without connecting to a repository.
+    VerifySourceMount {
+        /// Absolute root of the source mount.
+        path: PathBuf,
+        /// Disposable-test-only: after checking mountinfo, require a create_new
+        /// syscall to fail with EROFS. Never enabled by production Jobs.
+        #[arg(long)]
+        write_probe: bool,
+    },
     /// Browse-session readiness probe: exit 0 iff the session marker exists.
     Ready,
     /// Long-lived kopia web-UI server (connect, then exec `kopia server start`).

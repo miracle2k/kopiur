@@ -29,9 +29,7 @@ use kube::{Api, Client, ResourceExt};
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 
 use kopiur_api::{Repository, Restore, Snapshot, SnapshotPolicy};
-use kopiur_e2e::{
-    E2E_NAMESPACE, Need, World, builders, default_timeout, poll_interval, wait_until,
-};
+use kopiur_e2e::{E2E_NAMESPACE, Need, World, default_timeout, poll_interval, wait_until};
 
 const SUBPATH: &str = "stream";
 const REPO: &str = "e2e-stream-repo";

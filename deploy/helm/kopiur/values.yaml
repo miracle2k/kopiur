@@ -59,6 +59,15 @@ global:
 #     cluster-scoped repositories.
 installScope: cluster
 
+# Mandatory admission protection for the explicitly opted-in Direct PVC
+# RW-publication mode. This installs two cluster-scoped objects and therefore
+# requires cluster-admin installation rights even for namespaced operators.
+rwPublicationAdmission:
+  # -- Install the fail-closed RW-publication ValidatingAdmissionPolicy and Deny binding.
+  # Required before any compatibility mover can run; the controller verifies the
+  # installed specs. Disabled by default to preserve existing installation scope.
+  enabled: false
+
 # =============================================================================
 # Controller image
 # =============================================================================

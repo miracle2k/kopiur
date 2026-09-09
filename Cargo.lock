@@ -1826,6 +1826,7 @@ dependencies = [
 name = "kopiur-mover"
 version = "0.1.0"
 dependencies = [
+ "cel",
  "chrono",
  "clap",
  "http",
@@ -1835,6 +1836,7 @@ dependencies = [
  "kopiur-kopia",
  "kopiur-telemetry",
  "kube",
+ "libc",
  "opentelemetry",
  "rustls",
  "serde",

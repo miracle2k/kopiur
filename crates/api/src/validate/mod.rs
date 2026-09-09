@@ -27,6 +27,7 @@ mod backend;
 mod identity;
 mod repository;
 mod restore;
+mod rw_publication;
 mod snapshot;
 mod snapshot_replication_overlap;
 
@@ -35,6 +36,7 @@ pub use backend::*;
 pub use identity::*;
 pub use repository::*;
 pub use restore::*;
+pub use rw_publication::*;
 pub use snapshot::*;
 pub use snapshot_replication_overlap::*;
 
@@ -121,6 +123,27 @@ fn validate_pvc_selector(selector: &crate::snapshot_policy::PvcSelector) -> Vali
 /// `if let`s: a fifth source form then cannot compile until it is given content
 /// validation here, instead of silently falling through with none.
 pub fn validate_source(source: &Source) -> ValidationResult {
+    if (source.pvc_publication_read_only.is_some()
+        || source.acknowledge_read_write_publication.is_some())
+        && source.pvc.is_none()
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "spec.sources[].pvcPublicationReadOnly".to_string(),
+            reason: "PVC publication controls initially support only a literal pvc source; \
+                     pvcSelector, NFS, and stream sources are unsupported"
+                .to_string(),
+        });
+    }
+    if source.pvc_publication_read_only == Some(true)
+        && !crate::snapshot_policy::source_read_only(source)
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "spec.sources[].pvcPublicationReadOnly".to_string(),
+            reason: "a read-only PVC publication cannot honor readOnly: false on the mover \
+                     mount; omit pvcPublicationReadOnly to preserve writable-source semantics"
+                .to_string(),
+        });
+    }
     match crate::snapshot_policy::source_shape(source)? {
         SourceShape::Pvc(_) => Ok(()),
         SourceShape::PvcSelector(selector) => validate_pvc_selector(selector),
@@ -472,8 +495,21 @@ pub fn validate_throttle(field: &str, throttle: &crate::common::Throttle) -> Vec
 /// precisely to reconcile an inherited `runAsUser: 0` against the hardened `runAsNonRoot:
 /// true`. Merging one more layer in cannot smuggle an elevated mover past it.
 pub fn validate_mover(mover: &MoverSpec, context: &str) -> ValidationResult {
+    validate_mover_with_cache_ownership(mover, context, false)
+}
+
+/// The initializer is initially scoped to the compatibility SnapshotPolicy path;
+/// other mover kinds must reject the new field instead of silently ignoring it.
+pub(crate) fn validate_mover_with_cache_ownership(
+    mover: &MoverSpec,
+    context: &str,
+    allow_cache_ownership: bool,
+) -> ValidationResult {
     if let Some(resources) = &mover.resources {
         validate_resources(resources, context)?;
+    }
+    if !allow_cache_ownership {
+        validate_cache_ownership_scope(mover.cache.as_ref(), &format!("{context}.cache"))?;
     }
     Ok(())
 }

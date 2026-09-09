@@ -11,8 +11,10 @@ the checked-in deploy artifacts:
 
 - `gen-crds` → structural-schema CRD YAML under `deploy/crds/`
 - `gen-rbac` → the controller/webhook RBAC manifests under `deploy/`
+- `gen-admission` → the mandatory RW-publication policy/binding under `deploy/admission/`
+  and the matching opt-in Helm template, from the same typed specs checked by the controller
 - `gen-all` → CRDs + RBAC + the Grafana dashboard copy under
-  `deploy/helm/kopiur/files/dashboards/`
+  `deploy/helm/kopiur/files/dashboards/` + admission policy/binding + field-reference docs
 
 Each subcommand also takes a `--check` mode (`mise run gen-check`) that re-renders
 everything in memory and compares it against the checked-in files **without
@@ -27,7 +29,7 @@ It also hosts two non-generating gates:
 
 That gate exists because `gen-check` answers the wrong question. It proves the
 checked-in YAML matches the Rust types; it says nothing about whether anything
-*reads* a field, and since every `kopiur-api` type is `pub`, `dead_code` can
+_reads_ a field, and since every `kopiur-api` type is `pub`, `dead_code` can
 never fire on one either. Two bugs shipped through that gap — [#346] (`sources[].
 pvcSelector` had no implementation anywhere, so a policy using it died with
 `invariant violated … likely a bug in kopiur`) and [#351]
@@ -60,17 +62,17 @@ lets the integration tests under `tests/` exercise it directly.
 
 ## Key modules / types
 
-| Item                                              | Role                                                                                                                        |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| [`collect`]                                       | Returns the [`artifact::Artifact`]s a subcommand (`gen-crds` / `gen-rbac` / `gen-all`) is responsible for.                  |
-| [`run`]                                           | Drives a subcommand end-to-end: writes the artifacts, or in `--check` mode reports drift and returns the process exit code. |
-| [`artifact::Artifact`]                            | One generated file: a `deploy/`-relative path + its full content (including the generated-file header).                     |
-| [`artifact::write_all`] / [`artifact::check_all`] | Write every artifact to disk / compare against the checked-in files (the drift guard).                                      |
-| [`paths::workspace_root`] / [`paths::deploy_dir`] | Deterministic workspace-root resolution and the `deploy/` directory under it.                                               |
-| [`crds`] / [`rbac`] / [`dashboards`]              | The per-kind artifact generators.                                                                                           |
-| [`wiring`]                                        | The inert-field ratchet: walks the CRD schemas and asserts each field is read by a consumer crate or reviewed-and-allowlisted. |
+| Item                                              | Role                                                                                                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| [`collect`]                                       | Returns the [`artifact::Artifact`]s a subcommand (`gen-crds` / `gen-rbac` / `gen-all`) is responsible for.                               |
+| [`run`]                                           | Drives a subcommand end-to-end: writes the artifacts, or in `--check` mode reports drift and returns the process exit code.              |
+| [`artifact::Artifact`]                            | One generated file: a `deploy/`-relative path + its full content (including the generated-file header).                                  |
+| [`artifact::write_all`] / [`artifact::check_all`] | Write every artifact to disk / compare against the checked-in files (the drift guard).                                                   |
+| [`paths::workspace_root`] / [`paths::deploy_dir`] | Deterministic workspace-root resolution and the `deploy/` directory under it.                                                            |
+| [`crds`] / [`rbac`] / [`dashboards`]              | The per-kind artifact generators.                                                                                                        |
+| [`wiring`]                                        | The inert-field ratchet: walks the CRD schemas and asserts each field is read by a consumer crate or reviewed-and-allowlisted.           |
 | [`phases`]                                        | The phase-exhaustiveness ratchet: flags `matches!` / `_ =>` / `==` / `if let` over a phase enum, and condition types the CLI cannot see. |
-| [`scan`]                                          | The source-scanning primitives both ratchets share: comment/string scrubbing, `#[cfg(test)]` stripping, and the `.rs` walker. |
+| [`scan`]                                          | The source-scanning primitives both ratchets share: comment/string scrubbing, `#[cfg(test)]` stripping, and the `.rs` walker.            |
 
 ## Example
 

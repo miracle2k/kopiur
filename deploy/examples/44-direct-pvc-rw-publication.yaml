@@ -1,0 +1,30 @@
+# Requires deploy/admission/rw-publication.yaml and matching feature images.
+# Ordinary files only; validate on a disposable PVC before using live data.
+# CSI publication RW != mover process write access. Never add fsGroup here,
+# in repository defaults, or in an inherited workload context: kubelet could
+# recursively change the live source before the read-only mover starts.
+apiVersion: kopiur.home-operations.com/v1alpha1
+kind: SnapshotPolicy
+metadata:
+  name: app-files-rw-publication
+spec:
+  repository:
+    name: object-store
+  copyMethod: Direct
+  sources:
+    - pvc:
+        name: app-data
+      readOnly: true
+      pvcPublicationReadOnly: false
+      acknowledgeReadWritePublication: true
+  mover:
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+    podSecurityContext:
+      supplementalGroups: [1000]
+    # Optional, ordinary emptyDir only. Requires the namespace annotation
+    # kopiur.home-operations.com/privileged-movers: "true" and Pod Security
+    # permission for a cache-only root initializer. Never use fsGroup for cache.
+    # cache:
+    #   ownership: InitContainer

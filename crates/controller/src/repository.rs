@@ -1448,7 +1448,8 @@ async fn bootstrap_via_mover(
         io::filesystem_repo_mount_source(backend).map(|source| jobs::VolumeMountSpec {
             source,
             mount_path: io::filesystem_repo_path(backend).unwrap_or_default(),
-            read_only: false,
+            pvc_publication_read_only: false,
+            container_mount_read_only: false,
         });
     // The bootstrap (connect/create) Job has no recipe `mover`, but inherits the
     // repository's `moverDefaults` — the bootstrap-gap fix (ADR-0004 §1): a
@@ -1479,6 +1480,7 @@ async fn bootstrap_via_mover(
         .as_ref()
         .and_then(|b| b.failure_policy.as_ref());
     let inputs = MoverJobInputs {
+        cache_ownership: None,
         name: &job_name,
         namespace,
         owner,
