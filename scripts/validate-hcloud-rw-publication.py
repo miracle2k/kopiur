@@ -844,6 +844,27 @@ class Drill:
             if p.get("spec", {}).get("volumeName")
         )
         self.report["disposablePVs"] = sorted(self.pvs)
+        # A periodic catalog scan can recreate retained, discovered Snapshots
+        # after delete --all. Stop only this disposable repository's discovery
+        # before deleting its CRs; keep MinIO available for normal finalizers.
+        if self.get("repository", "disposable") is not None:
+            self.kube(
+                "patch",
+                "repository",
+                "disposable",
+                "--type=merge",
+                "-p",
+                '{"spec":{"suspend":true}}',
+            )
+            self.kube(
+                "delete",
+                "job",
+                "disposable-discovery",
+                "--ignore-not-found",
+                "--cascade=foreground",
+                "--wait=true",
+                "--timeout=60s",
+            )
         # Keep MinIO alive until Kopiur finalizers finish. Retain snapshots avoid
         # unnecessary object-store deletes; destroying MinIO then drops this
         # independent disposable repository and all its temporary credentials.

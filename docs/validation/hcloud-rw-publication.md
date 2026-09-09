@@ -77,7 +77,9 @@ The drill checks:
    match exactly before and after each backup; a default SELinux label appearing
    on scratch storage is not evidence that Kopia restored that label.
 8. An RWOP compatibility source is rejected before any mover Job exists.
-9. Cleanup removes temporary Kopiur resources while MinIO remains available for
+9. Cleanup suspends only the disposable repository and stops its catalog scan
+   Job, preventing rediscovery from recreating Snapshot CRs during deletion.
+   It removes temporary Kopiur resources while MinIO remains available for
    finalizers, then deletes the namespace and verifies deletion. It never strips
    finalizers or force-deletes a PVC. A cleanup failure names the exact namespace
    that needs inspection. The selected StorageClass must use `Delete` reclaim
