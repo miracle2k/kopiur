@@ -67,7 +67,7 @@ each `repository` is a **full registry + path** string:
 - **mover** — `mover.image.*` (its own `mover.image.pullPolicy`).
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:62:86"
+--8<-- "deploy/helm/kopiur/values.yaml:71:95"
 ```
 
 Each image takes a `tag` (defaults to the chart's `appVersion` when empty) or a
@@ -136,7 +136,7 @@ namespaces it manages, so each is gated behind a Helm flag — the chart does
 names match the CRD field that triggers them.
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:303:332"
+--8<-- "deploy/helm/kopiur/values.yaml:312:341"
 ```
 
 | CRD field you set… | …needs this Helm flag | Grants `secrets` |
@@ -159,7 +159,7 @@ symptom→fix loop.
 ## ServiceAccount
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:290:301"
+--8<-- "deploy/helm/kopiur/values.yaml:299:310"
 ```
 
 Set `serviceAccount.create: false` to bring your own. The `annotations` map is
@@ -174,7 +174,7 @@ The controller's knobs live at the **root** of the values file (no `controller.`
 prefix): a root-level workload key applies to the controller alone.
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:89:239"
+--8<-- "deploy/helm/kopiur/values.yaml:98:248"
 ```
 
 The operator itself. The settings worth knowing:
@@ -265,7 +265,7 @@ ceiling first. See `crates/e2e/tests/lifecycle.rs`.
 ### Controller port & probes
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:263:288"
+--8<-- "deploy/helm/kopiur/values.yaml:272:297"
 ```
 
 The controller has a single operational port, `metrics.port` (default `8081`),
@@ -303,7 +303,7 @@ it), `webhook.replicaCount`, scheduling (`webhook.nodeSelector` /
 security](#pod-security)). A root-level workload key never touches it.
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:454:509"
+--8<-- "deploy/helm/kopiur/values.yaml:463:518"
 ```
 
 - **`enabled`** — when `false`, validation falls back to the controller's
@@ -321,7 +321,7 @@ security](#pod-security)). A root-level workload key never touches it.
 ### Webhook TLS
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:562:592"
+--8<-- "deploy/helm/kopiur/values.yaml:571:601"
 ```
 
 The webhook **always** serves TLS (Kubernetes requires HTTPS for admission);
@@ -340,7 +340,7 @@ TLS](install.md#webhook-tls).
 ## Monitoring (Prometheus & Grafana)
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:391:452"
+--8<-- "deploy/helm/kopiur/values.yaml:400:461"
 ```
 
 All metrics are under the `kopiur_` namespace and served via a Prometheus **pull**
@@ -389,7 +389,7 @@ The webhook's own HTTPS scrape lives separately under
 ## OpenTelemetry (OTLP)
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:367:389"
+--8<-- "deploy/helm/kopiur/values.yaml:376:398"
 ```
 
 Off by default. Metrics are **always** available via the `/metrics` pull endpoint;
@@ -406,7 +406,7 @@ and a sample collector config.
 ## Logging
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:348:365"
+--8<-- "deploy/helm/kopiur/values.yaml:357:374"
 ```
 
 Controls the stdout (`kubectl logs`) logging every component writes. The
@@ -465,7 +465,7 @@ a filesystem/NFS-backed repository for in-process kopia ops) never loosens the
 webhook.
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:241:261"
+--8<-- "deploy/helm/kopiur/values.yaml:250:270"
 ```
 
 Defaults for both: non-root **uid/gid 65534 (nobody)**, `runAsNonRoot`, a
@@ -474,7 +474,7 @@ filesystem, and all capabilities dropped (the images are `distroless:nonroot`).
 The webhook's own block:
 
 ```yaml
---8<-- "deploy/helm/kopiur/values.yaml:510:526"
+--8<-- "deploy/helm/kopiur/values.yaml:519:535"
 ```
 
 /// note | This is the operator's security context, not the mover's

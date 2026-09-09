@@ -81,6 +81,13 @@ for p in [root, *sorted(root.rglob('*'))]:
 print(json.dumps(out, sort_keys=True))
 """
 
+# fsGroup rewrites can start at the volume root, even when every backed-up file
+# is readable. Include ext4 lost+found and the seed marker in source-preservation
+# checks; restore comparison separately covers the ordinary-files snapshot tree.
+WHOLE_SOURCE_INVENTORY = INVENTORY.replace(
+    "Path('/data/ordinary-files')", "Path('/data')"
+)
+
 APP_WRITE = r"""
 import os, pathlib
 p = pathlib.Path('/data/ordinary-files/app-live-marker')
@@ -535,6 +542,10 @@ class Drill:
         )
         self.before = json.loads(self.exec_python("holder", INVENTORY))
         self.report["sourceBefore"] = self.before
+        self.source_before = json.loads(
+            self.exec_python("holder", WHOLE_SOURCE_INVENTORY)
+        )
+        self.report["wholeSourceBefore"] = self.source_before
 
     def backup(self, name, initializer=False, replace_holder=False):
         if initializer:
@@ -546,6 +557,10 @@ class Drill:
             )
             self.before = json.loads(self.exec_python("holder", INVENTORY))
             self.report["sourceBeforeInitializedCache"] = self.before
+            self.source_before = json.loads(
+                self.exec_python("holder", WHOLE_SOURCE_INVENTORY)
+            )
+            self.report["wholeSourceBeforeInitializedCache"] = self.source_before
         source = {
             "pvc": {"name": "source"},
             "readOnly": True,
@@ -595,7 +610,9 @@ class Drill:
             v for v in spec["containers"][0]["volumeMounts"] if v["name"] == "source"
         )
         self.check(
-            source_volume["persistentVolumeClaim"].get("readOnly") is False
+            # Kubernetes omits its false-valued Go bool when serializing a PVC
+            # publication. Missing here means RW; policy opt-in remains explicit.
+            source_volume["persistentVolumeClaim"].get("readOnly", False) is False
             and mount.get("readOnly") is True,
             f"{name}: RW PVC publication and RO mover mount",
         )
@@ -655,7 +672,7 @@ class Drill:
             )
             and next(v for v in admitted_spec["volumes"] if v["name"] == "source")[
                 "persistentVolumeClaim"
-            ].get("readOnly")
+            ].get("readOnly", False)
             is False
             and next(
                 v
@@ -718,6 +735,12 @@ class Drill:
         self.check(
             after == self.before,
             f"{name}: source bytes, UID/GID, modes, ACLs, xattrs and mtimes unchanged",
+        )
+        whole_after = json.loads(self.exec_python("holder", WHOLE_SOURCE_INVENTORY))
+        self.report.setdefault("wholeSourceAfter", {})[name] = whole_after
+        self.check(
+            whole_after == self.source_before,
+            f"{name}: complete source including PVC root, lost+found and seed marker unchanged",
         )
 
     def restore(self):

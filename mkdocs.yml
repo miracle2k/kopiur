@@ -189,6 +189,7 @@ nav:
       - Backups & schedules: backups.md
       - Copy methods (Snapshot/Clone/Direct): copy-methods.md
       - Direct PVC RW publication: direct-pvc-rw-publication.md
+      - HCloud RW-publication validation drill: validation/hcloud-rw-publication.md
       - Streamed command sources (DB dumps): stream-sources.md
       - PVC access modes & RWOP: access-modes.md
       - Restores: restores.md

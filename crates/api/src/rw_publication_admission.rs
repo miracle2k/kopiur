@@ -134,7 +134,11 @@ fn validations() -> Vec<Value> {
             "RW-publication main mover must retain non-root, no escalation, drop ALL, no added capabilities, and RuntimeDefault seccomp",
         ),
         validation(
-            "size(variables.sourceVolumes) == 1 && has(variables.sourceVolumes[0].persistentVolumeClaim) && has(variables.sourceVolumes[0].persistentVolumeClaim.readOnly) && !variables.sourceVolumes[0].persistentVolumeClaim.readOnly && variables.ps.volumes.filter(v, has(v.persistentVolumeClaim)).size() == 1",
+            // Kubernetes' Go PVCVolumeSource.readOnly is a non-pointer bool
+            // with omitempty. An explicitly rendered false disappears before
+            // CEL evaluates admission; absence therefore means publication RW.
+            // The container mount's true remains mandatory in the next rule.
+            "size(variables.sourceVolumes) == 1 && has(variables.sourceVolumes[0].persistentVolumeClaim) && (!has(variables.sourceVolumes[0].persistentVolumeClaim.readOnly) || !variables.sourceVolumes[0].persistentVolumeClaim.readOnly) && variables.ps.volumes.filter(v, has(v.persistentVolumeClaim)).size() == 1",
             "RW-publication requires exactly one writable PVC publication named source; additional PVC aliases are forbidden",
         ),
         validation(
@@ -330,6 +334,51 @@ mod tests {
                 assert_eq!(denials(object, Value::Null, true), Vec::<String>::new());
             }
         }
+    }
+
+    #[test]
+    fn kubernetes_omits_false_pvc_publication_without_changing_writable_semantics() {
+        for initializer in [false, true] {
+            let mut pod = pod();
+            // API-server Go serialization uses omitempty for this non-pointer
+            // bool, even when the controller submitted an explicit false.
+            pod["spec"]["volumes"][0]["persistentVolumeClaim"]
+                .as_object_mut()
+                .unwrap()
+                .remove("readOnly");
+            if initializer {
+                pod["spec"]["initContainers"] = json!([init()]);
+            }
+            let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"labels": {RW_PUBLICATION_LABEL: "true"}}, "spec": {"template": {"metadata": pod["metadata"], "spec": pod["spec"]}}});
+            for object in [pod, job] {
+                assert_eq!(denials(object, Value::Null, true), Vec::<String>::new());
+            }
+        }
+        let mut unsafe_mount = pod();
+        unsafe_mount["spec"]["volumes"][0]["persistentVolumeClaim"]
+            .as_object_mut()
+            .unwrap()
+            .remove("readOnly");
+        unsafe_mount["spec"]["containers"][0]["volumeMounts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("readOnly");
+        assert_rejected(unsafe_mount, "read-only filesystem mount");
+    }
+
+    #[test]
+    fn physical_split_selection_handles_omitted_false_publication_after_injection() {
+        let mut pod = pod();
+        pod["metadata"]["labels"] = json!({"app.kubernetes.io/managed-by": "kopiur"});
+        pod["spec"]["containers"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("args");
+        pod["spec"]["volumes"][0]["persistentVolumeClaim"]
+            .as_object_mut()
+            .unwrap()
+            .remove("readOnly");
+        assert_rejected(pod, "Pod label");
     }
 
     #[test]
