@@ -132,3 +132,32 @@ had rediscovered two retained test snapshots. This intervention is recorded in
 the evidence; the harness now pauses discovery before deleting its resources.
 All temporary namespace resources and HCloud PVs were deleted without stripping
 finalizers. No production source or repository credentials were used by the drill.
+
+## Root identity validation: 2026-09-09
+
+K7 passed **81 assertions** with runtime revision
+[`71233e0`](https://github.com/miracle2k/kopiur/commit/71233e01914bf7a5cb2c37b1e3e5f775adca984c).
+The [root validation evidence](results/hcloud-k7-root-2026-09-09.json) records all
+three mover image digests, effective root hardening, the private `0600` marker,
+source/restore comparison digests, namespace-gate denial and cleanup.
+
+The two existing non-root cache cases still passed. A third mover used UID/GID 0,
+`runAsNonRoot: false`, no added capabilities and the existing namespace grant,
+without a `privilegedMode` setting or another compatibility opt-in. HCloud
+accepted its same-node RW publication, the mover's source write probe returned
+`EROFS`, and the holder remained writable. The complete source inventory matched
+before and after backup, including contents, ownership, modes, ACLs, xattrs and
+nanosecond mtimes. Scratch restore recovered the root-owned `0600` marker and the
+entire fixture with contents, ownership, modes and mtimes intact; Kopia's ACL/xattr
+archival limitation remains as described above.
+
+Removing the disposable namespace's privilege grant caused both Job and Pod
+admission to reject root execution. The controller also parked a root Snapshot
+with `MoverPermitted=False` before creating any Job. RWOP remained refused.
+Cleanup completed automatically, deleting all temporary resources and HCloud PVs
+without manual intervention or finalizer stripping.
+
+Local verification passed 3,223 workspace tests, all-features compilation,
+formatting, clippy with warnings denied, codegen/wiring/phase checks, the
+29-function complexity budget, 93 Helm tests, alert-rule tests and the strict
+documentation build.
