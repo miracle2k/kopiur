@@ -101,3 +101,24 @@ Passing rendering and unit tests alone is not a substitute for this drill. Recor
 the tested CSI version, StorageClass, image revision and evidence path when
 claiming HCloud validation. Do not update a production filesystem policy until
 the disposable source-preservation and scratch-restore checks succeed.
+
+## Recorded validation: 2026-09-09
+
+K7 passed **51 assertions** with HCloud CSI **v2.22.1**, StorageClass
+`hcloud-volumes`, `fsGroupPolicy: File`, Kopia **0.23.1**, and runtime revision
+[`8faf9da`](https://github.com/miracle2k/kopiur/commit/8faf9da2f1b2fa9940be801e193a2471e172958f).
+The [sanitized evidence](results/hcloud-k7-2026-09-09.json) records image digests,
+runtime proof, cache-initializer settings, comparison digests and each assertion.
+
+Both ordinary `emptyDir` and cache-only initialization at UID/GID 1000 passed.
+The mover's write attempts returned `EROFS`, the holder remained writable and
+could be replaced during backup, and both whole-PVC inventories remained exactly
+unchanged. Scratch contents, ownership, modes and nanosecond mtimes matched with
+permission errors enforced; the ACL/xattr restore limitation above is recorded
+explicitly. RWOP was rejected before a mover Job existed.
+
+Cleanup completed after pausing the disposable repository's catalog scan, which
+had rediscovered two retained test snapshots. This intervention is recorded in
+the evidence; the harness now pauses discovery before deleting its resources.
+All temporary namespace resources and HCloud PVs were deleted without stripping
+finalizers. No production source or repository credentials were used by the drill.

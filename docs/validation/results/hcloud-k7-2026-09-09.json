@@ -1,0 +1,159 @@
+{
+  "cacheInitializer": {
+    "args": [
+      "cache-init",
+      "--uid",
+      "1000",
+      "--gid",
+      "1000"
+    ],
+    "image": "ghcr.io/miracle2k/kopiur-mover:8faf9da2f1b2fa9940be801e193a2471e172958f",
+    "securityContext": {
+      "allowPrivilegeEscalation": false,
+      "capabilities": {
+        "add": [
+          "CHOWN"
+        ],
+        "drop": [
+          "ALL"
+        ]
+      },
+      "readOnlyRootFilesystem": true,
+      "runAsGroup": 0,
+      "runAsNonRoot": false,
+      "runAsUser": 0,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "volumeMounts": [
+      {
+        "mountPath": "/var/cache/kopia",
+        "name": "kopia-cache"
+      }
+    ]
+  },
+  "cleanupNote": "A periodic catalog scan recreated two Snapshot records during cleanup. Only the disposable Repository was suspended and those records were deleted normally; the harness then completed namespace/PV cleanup. The script now suspends discovery and stops its scan Job before deletion. No finalizers were stripped.",
+  "comparisonDigests": {
+    "initializedCacheSourceAndScratchRestoreSupportedFields": "817b52cba2bd9971c6b76e0228c41298a9868392b7e834e3475e1552d4524667",
+    "initializedCacheWholeSourceBeforeAndAfter": "19bad38955609b3eba3292bb82dece51cf59376c5b28a09184e8481f7ec688c2",
+    "ordinaryCacheWholeSourceBeforeAndAfter": "1d5e876b54838b0acd3ed7148bea45bb05f0964cd380d75ae9dbab55f96e105b"
+  },
+  "date": "2026-09-09",
+  "environment": {
+    "driver": "csi.hetzner.cloud",
+    "driverImages": [
+      "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.16.0",
+      "registry.k8s.io/sig-storage/livenessprobe:v2.18.0",
+      "docker.io/hetznercloud/hcloud-csi-driver:v2.22.1"
+    ],
+    "fsGroupPolicy": "File",
+    "repository": "independent disposable MinIO on emptyDir",
+    "sourceAccessMode": "ReadWriteOnce",
+    "storageClass": "hcloud-volumes"
+  },
+  "imageBuild": "https://github.com/miracle2k/kopiur/actions/runs/34362051025",
+  "moverImages": {
+    "initialized-cache": {
+      "image": "ghcr.io/miracle2k/kopiur-mover:8faf9da2f1b2fa9940be801e193a2471e172958f",
+      "imageID": "ghcr.io/miracle2k/kopiur-mover@sha256:c495fb90a5649f62211fdba957b5f03b721556e67190c3b6a2d2928e25047b0a"
+    },
+    "ordinary-cache": {
+      "image": "ghcr.io/miracle2k/kopiur-mover:8faf9da2f1b2fa9940be801e193a2471e172958f",
+      "imageID": "ghcr.io/miracle2k/kopiur-mover@sha256:c495fb90a5649f62211fdba957b5f03b721556e67190c3b6a2d2928e25047b0a"
+    }
+  },
+  "passedAssertionCount": 51,
+  "passedAssertions": [
+    "source-protection admission policy and Deny binding are installed",
+    "explicit StorageClass uses HCloud CSI",
+    "disposable StorageClass deletes dynamically provisioned volumes",
+    "admission: valid Job accepted (dry run)",
+    "admission: Job writable-source rejected by source-protection policy (dry run)",
+    "admission: Job fs-group rejected by source-protection policy (dry run)",
+    "admission: Job sidecar rejected by source-protection policy (dry run)",
+    "admission: valid Pod accepted (dry run)",
+    "admission: Pod writable-source rejected by source-protection policy (dry run)",
+    "admission: Pod fs-group rejected by source-protection policy (dry run)",
+    "admission: Pod sidecar rejected by source-protection policy (dry run)",
+    "ordinary-cache: no Pod fsGroup or fsGroupChangePolicy",
+    "ordinary-cache: exactly one ordinary mover container",
+    "ordinary-cache: RW PVC publication and RO mover mount",
+    "ordinary-cache: no host privileges or paths",
+    "ordinary-cache: expected cache initializer count",
+    "ordinary-cache: mover colocated with live holder",
+    "ordinary-cache: no admitted sidecar injection",
+    "ordinary-cache: admitted Pod retains safe source mount and fsGroup exclusion",
+    "ordinary-cache: actual mover write attempt refused with EROFS",
+    "ordinary-cache: mover survived holder Pod replacement",
+    "ordinary-cache: snapshot succeeded with writable cache and no fsGroup",
+    "ordinary-cache: source bytes, UID/GID, modes, ACLs, xattrs and mtimes unchanged",
+    "ordinary-cache: complete source including PVC root, lost+found and seed marker unchanged",
+    "admission: valid Job accepted (dry run)",
+    "admission: Job writable-source rejected by source-protection policy (dry run)",
+    "admission: Job fs-group rejected by source-protection policy (dry run)",
+    "admission: Job sidecar rejected by source-protection policy (dry run)",
+    "admission: Job initializer-source-alias rejected by source-protection policy (dry run)",
+    "admission: valid Pod accepted (dry run)",
+    "admission: Pod writable-source rejected by source-protection policy (dry run)",
+    "admission: Pod fs-group rejected by source-protection policy (dry run)",
+    "admission: Pod sidecar rejected by source-protection policy (dry run)",
+    "admission: Pod initializer-source-alias rejected by source-protection policy (dry run)",
+    "initialized-cache: no Pod fsGroup or fsGroupChangePolicy",
+    "initialized-cache: exactly one ordinary mover container",
+    "initialized-cache: RW PVC publication and RO mover mount",
+    "initialized-cache: no host privileges or paths",
+    "initialized-cache: expected cache initializer count",
+    "initialized-cache: cache initializer sees cache only and no credentials",
+    "initialized-cache: mover colocated with live holder",
+    "initialized-cache: no admitted sidecar injection",
+    "initialized-cache: admitted Pod retains safe source mount and fsGroup exclusion",
+    "initialized-cache: same-image cache initializer targets effective mover UID/GID 1000",
+    "initialized-cache: actual mover write attempt refused with EROFS",
+    "initialized-cache: snapshot succeeded with writable cache and no fsGroup",
+    "initialized-cache: source bytes, UID/GID, modes, ACLs, xattrs and mtimes unchanged",
+    "initialized-cache: complete source including PVC root, lost+found and seed marker unchanged",
+    "scratch restore preserves fixture bytes, UID/GID, modes and nanosecond mtimes",
+    "RWOP rejected before any mover Job exists",
+    "temporary namespace, Jobs, Pods, PVCs, Snapshots and credentials deleted"
+  ],
+  "restoreCompared": [
+    "contents",
+    "uid",
+    "gid",
+    "mode",
+    "nanosecond mtime"
+  ],
+  "restoreLimitation": {
+    "description": "Kopia 0.23.1 does not archive or restore POSIX ACLs or extended attributes. Source preservation checks still compare all of them unchanged.",
+    "restoreImplementation": "https://github.com/kopia/kopia/blob/v0.23.1/snapshot/restore/local_fs_output.go#L249-L290",
+    "snapshotFormat": "https://github.com/kopia/kopia/blob/v0.23.1/snapshot/manifest.go#L114-L125"
+  },
+  "result": "passed",
+  "revision": "8faf9da2f1b2fa9940be801e193a2471e172958f",
+  "runtimeProof": {
+    "initialized-cache": {
+      "command": "kopiur-mover verify-source-mount /pvc/source --write-probe",
+      "exitCode": 0,
+      "mountinfoReadOnly": true,
+      "writeAttemptErrno": "EROFS"
+    },
+    "ordinary-cache": {
+      "command": "kopiur-mover verify-source-mount /pvc/source --write-probe",
+      "exitCode": 0,
+      "mountinfoReadOnly": true,
+      "writeAttemptErrno": "EROFS"
+    }
+  },
+  "schemaVersion": 1,
+  "scope": "Disposable PVCs only. Node names, namespace/PV/Job identities, production application identifiers and credentials are excluded.",
+  "sourcePreservationCompared": [
+    "contents",
+    "uid",
+    "gid",
+    "mode",
+    "POSIX ACLs",
+    "xattrs",
+    "nanosecond mtime"
+  ]
+}

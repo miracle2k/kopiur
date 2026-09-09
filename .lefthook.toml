@@ -21,7 +21,9 @@ run = "mise run helm-docs && git add deploy/helm/kopiur/README.md deploy/helm/ko
 exclude = ["deploy/helm/kopiur/README.md", "docs/**"]
 
 [pre-commit.commands.format-json]
-exclude = ["deploy/helm/kopiur/values.schema.json"]
+# Validation evidence follows the docs/ ignore rule too; avoid an all-ignored
+# formatter invocation when a commit contains only that JSON artifact.
+exclude = ["deploy/helm/kopiur/values.schema.json", "docs/**"]
 
 # Generated CRD manifests (xtask gen-crds) ship verbatim — keep the shared YAML
 # formatter off them so it doesn't reflow generated output. Chart templates are
