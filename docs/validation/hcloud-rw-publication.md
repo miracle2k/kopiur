@@ -66,8 +66,16 @@ The drill checks:
    65532, and checks that the initializer has only a cache mount and no
    credential environment. Its resolved arguments are recorded as evidence.
 7. The completed snapshot restores into a fresh scratch HCloud PVC; the restored
-   marker tree matches the source bytes and metadata. The restore deliberately
-   uses the separately gated root restore option to reproduce file ownership.
+   marker tree matches the source bytes, UID/GID, modes and nanosecond mtimes.
+   The restore deliberately uses the separately gated root restore option to
+   reproduce file ownership, with `ignorePermissionErrors: false` so failures
+   cannot be hidden. Kopia 0.23.1 does not store or restore POSIX ACLs or xattrs:
+   its [snapshot manifest](https://github.com/kopia/kopia/blob/v0.23.1/snapshot/manifest.go#L114-L125)
+   has no fields for them and its [restore attributes implementation](https://github.com/kopia/kopia/blob/v0.23.1/snapshot/restore/local_fs_output.go#L249-L290)
+   applies ownership, mode and times only. The report explicitly records
+   `restoreXattrDifferences` and this limitation. All source ACLs/xattrs must still
+   match exactly before and after each backup; a default SELinux label appearing
+   on scratch storage is not evidence that Kopia restored that label.
 8. An RWOP compatibility source is rejected before any mover Job exists.
 9. Cleanup removes temporary Kopiur resources while MinIO remains available for
    finalizers, then deletes the namespace and verifies deletion. It never strips

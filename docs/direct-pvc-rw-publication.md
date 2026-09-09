@@ -11,6 +11,15 @@ This is strong process-level protection, not a hardware-level immutable source.
 The application can still write. Live database consistency, privileged node
 administrators and arbitrary CSI implementations are outside this guarantee.
 
+Preserving the live source does not imply that Kopia archives every attribute.
+The pinned Kopia 0.23.1 does not store POSIX ACLs or extended attributes in its
+[snapshot entries](https://github.com/kopia/kopia/blob/v0.23.1/snapshot/manifest.go#L114-L125);
+its [restore implementation](https://github.com/kopia/kopia/blob/v0.23.1/snapshot/restore/local_fs_output.go#L249-L290)
+restores ownership, permission modes and timestamps. Compatibility backups leave
+source ACLs/xattrs unchanged, but cannot recover those attributes from Kopia.
+The validation drill checks source preservation including ACLs/xattrs separately
+from scratch restoration of contents, UID/GID, modes and nanosecond mtimes.
+
 | Mode | PVC publication | Mover mount | Pod fsGroup |
 | --- | --- | --- | --- |
 | Ordinary Direct | RO | RO | Existing defaults |

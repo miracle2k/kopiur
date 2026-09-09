@@ -414,9 +414,10 @@ class Drill:
                 "KOPIA_PASSWORD": secrets.token_urlsafe(32),
             },
         )
-        secret_ref = lambda key: {
-            "secretKeyRef": {"name": "disposable-credentials", "key": key}
-        }
+
+        def secret_ref(key):
+            return {"secretKeyRef": {"name": "disposable-credentials", "key": key}}
+
         self.create(
             "Pod",
             "minio",
@@ -753,6 +754,7 @@ class Drill:
                         "accessModes": ["ReadWriteOnce"],
                     }
                 },
+                "options": {"ignorePermissionErrors": False},
                 "mover": {
                     "privilegedMode": True,
                     "securityContext": {
@@ -764,16 +766,38 @@ class Drill:
                 },
             },
         )
-        self.phase("restore", "scratch-restore")
+        self.phase("restore", "scratch-restore", "Completed")
         self.fixture_pod(
             "scratch-check", claim="scratch", script="import time; time.sleep(3600)"
         )
         restored = json.loads(self.exec_python("scratch-check", INVENTORY))
         self.report["restored"] = restored
-        self.check(
-            restored == self.before,
-            "scratch restore preserves fixture bytes and metadata",
+        # Kopia 0.23.1 stores ownership/mode/mtime, but its DirEntry manifest
+        # has no POSIX ACL or xattr fields. Keep SOURCE xattr preservation strict
+        # above; report the restore limitation explicitly rather than claiming
+        # that unchanged/default filesystem labels were restored by Kopia.
+        self.report["restoreXattrDifferences"] = {
+            path: {"source": values["xattrs"], "restored": restored[path]["xattrs"]}
+            for path, values in self.before.items()
+            if path in restored and values["xattrs"] != restored[path]["xattrs"]
+        }
+        self.report["restoreLimitation"] = (
+            "Kopia 0.23.1 does not store or restore POSIX ACLs or extended attributes. "
+            "Source ACLs/xattrs must remain unchanged; scratch comparison requires "
+            "exact bytes, UID/GID, modes and nanosecond mtimes."
         )
+
+        def supported_metadata(inventory):
+            return {
+                path: {key: value for key, value in values.items() if key != "xattrs"}
+                for path, values in inventory.items()
+            }
+
+        self.check(
+            supported_metadata(restored) == supported_metadata(self.before),
+            "scratch restore preserves fixture bytes, UID/GID, modes and nanosecond mtimes",
+        )
+        print(self.report["restoreLimitation"], flush=True)
 
     def rwop_negative(self):
         self.pvc("rwop", "ReadWriteOncePod")
