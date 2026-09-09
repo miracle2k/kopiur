@@ -1433,15 +1433,23 @@ async fn reconcile_inner(backup: &Snapshot, ctx: &Context) -> Result<Action> {
     // `kopiur.home-operations.com/privileged-movers` annotation — a tenant there could
     // otherwise reuse the minted mover SA at that privilege. Refuse with a clear
     // `MoverPermitted=False` condition + Event otherwise.
-    let cache_init_permitted = cache_ownership.is_none()
-        || publication::cache_init_allowed(&ctx.client, &namespace).await?;
-    if !cache_init_permitted
-        || (kopiur_api::common::requires_privilege_resolved(
-            Some(&resolved_mover.security_context),
-            resolved_mover.pod_security_context.as_ref(),
-            privileged_mode,
-        )) && !io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
-    {
+    let requests_privilege = kopiur_api::common::requires_privilege_resolved(
+        Some(&resolved_mover.security_context),
+        resolved_mover.pod_security_context.as_ref(),
+        privileged_mode,
+    );
+    let privilege_permitted = if !requests_privilege && cache_ownership.is_none() {
+        true
+    } else if rw_publication {
+        // Root identity and RW publication are independent. Reuse the existing
+        // namespace opt-in, but require an actual grant for this guarded mode:
+        // the legacy namespaced-install 403 fallback cannot prove permission.
+        publication::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
+    } else {
+        io::namespace_allows_privileged_movers(&ctx.client, &namespace).await?
+    };
+    let cache_init_permitted = cache_ownership.is_none() || privilege_permitted;
+    if !privilege_permitted {
         let sa = ctx
             .mover_service_account
             .as_deref()

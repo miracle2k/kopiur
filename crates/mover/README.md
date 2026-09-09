@@ -113,7 +113,11 @@ real repository and cluster, so they are not runnable doctests.
 
 Explicit compatibility Jobs publish the source PVC RW to CSI and mount it RO in
 the mover. **CSI publication RW != mover process write access.** The main mover
-keeps its normal non-root hardening. Pod `fsGroup` and `fsGroupChangePolicy` are
+defaults to non-root. An explicitly configured root identity uses the existing
+`kopiur.home-operations.com/privileged-movers=true` namespace gate. Root still
+receives the RO source mount, no added capabilities, no privilege escalation,
+and RuntimeDefault seccomp; it does not bypass the kernel mount preflight.
+Pod `fsGroup` and `fsGroupChangePolicy` are
 rejected before Job creation, because kubelet could otherwise rewrite the live
 source's ownership and modes before this binary ever runs.
 
@@ -130,7 +134,8 @@ only the ordinary emptyDir cache at `/var/cache/kopia`, with no env, source,
 repository, work spec, or service-account credentials. It accepts only an empty
 root:root cache root, opens it without following symlinks, chmods that inode to
 0700, then uses its sole added CHOWN capability to assign the effective mover
-UID/GID. Reused caches fail closed. This root init container requires the deliberate
+UID/GID, including UID 0 when the main mover deliberately runs as root. Reused
+caches fail closed. This root init container requires the deliberate
 namespace privilege gate; Pod-wide fsGroup remains absent. API credentials are
 explicitly projected only into the main mover, with automatic token mounts off.
 

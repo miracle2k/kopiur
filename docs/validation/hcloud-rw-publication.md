@@ -27,10 +27,13 @@ to check existing Direct node colocation.
 The namespace explicitly grants Kopiur's privileged-mover permission and uses
 Baseline Pod Security for the cache initializer and scratch restore. Source
 fixture setup runs as root only inside the disposable holder Pod to create
-ownership, permission and ACL test cases. Compatibility backup movers remain
-non-root with no added capabilities. The cache initializer must mount only its
-cache. Root fixture setup and scratch-restore settings must never be copied to a
-production compatibility backup policy.
+ownership, permission and ACL test cases. The first two compatibility backups
+retain non-root hardening. A third explicitly uses UID/GID 0 and
+`runAsNonRoot: false` to read root-owned `0600` files through their owner permission
+bits, with all capabilities dropped and no added capabilities. It needs the
+existing namespace grant and no additional API flag. The cache initializer must
+mount only its cache. Root fixture setup and scratch-restore capabilities must
+never be copied to a production compatibility backup policy.
 
 The drill checks:
 
@@ -65,7 +68,14 @@ The drill checks:
    `cache.ownership: InitContainer`, mover UID/GID 1000 and supplemental group
    65532, and checks that the initializer has only a cache mount and no
    credential environment. Its resolved arguments are recorded as evidence.
-7. The completed snapshot restores into a fresh scratch HCloud PVC; the restored
+7. Before a third baseline, the disposable holder prepares root-owned `0700`
+   directories and `0600` files, including a private marker. A capless root mover
+   backs them up using ordinary `emptyDir`; source content and all recorded
+   metadata remain identical. Removing the disposable namespace's existing
+   privilege grant then causes real Job/Pod admission dry runs to fail and the
+   controller to refuse a root Snapshot before Job creation. The grant is
+   restored before the scratch restore.
+8. The root-owned snapshot restores into a fresh scratch HCloud PVC; the restored
    marker tree matches the source bytes, UID/GID, modes and nanosecond mtimes.
    The restore deliberately uses the separately gated root restore option to
    reproduce file ownership, with `ignorePermissionErrors: false` so failures
@@ -76,8 +86,8 @@ The drill checks:
    `restoreXattrDifferences` and this limitation. All source ACLs/xattrs must still
    match exactly before and after each backup; a default SELinux label appearing
    on scratch storage is not evidence that Kopia restored that label.
-8. An RWOP compatibility source is rejected before any mover Job exists.
-9. Cleanup suspends only the disposable repository and stops its catalog scan
+9. An RWOP compatibility source is rejected before any mover Job exists.
+10. Cleanup suspends only the disposable repository and stops its catalog scan
    Job, preventing rediscovery from recreating Snapshot CRs during deletion.
    It removes temporary Kopiur resources while MinIO remains available for
    finalizers, then deletes the namespace and verifies deletion. It never strips

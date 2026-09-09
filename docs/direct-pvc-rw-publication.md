@@ -94,10 +94,45 @@ Effective `seLinuxOptions` and `seLinuxChangePolicy` are also rejected to preven
 live-source relabeling and xattr changes.
 
 UID, GID and supplemental groups are allowed because they affect process
-identity. The main mover must keep `runAsNonRoot: true`,
+identity. RW publication requires a hardened mover: `privileged: false`,
 `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, no added
-capabilities, and `RuntimeDefault` seccomp. Root/privileged source movers are
-forbidden even in a namespace that permits privileged movers.
+capabilities, and `RuntimeDefault` seccomp. The default identity remains non-root.
+
+For root-owned ordinary files, UID 0 is allowed through the **existing** namespace
+privilege gate. A namespace administrator must explicitly set:
+
+```yaml
+metadata:
+  annotations:
+    kopiur.home-operations.com/privileged-movers: "true"
+```
+
+The namespace must also permit root containers under Pod Security Admission.
+The policy can then override the mover identity while keeping its hardening:
+
+```yaml
+mover:
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    runAsNonRoot: false
+    privileged: false
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+```
+
+No compatibility-specific root flag, second acknowledgement, or `privilegedMode`
+setting is required. Both the controller and admission guard require the
+namespace grant; a namespace lookup failure cannot count as permission. Kopiur
+never adds the annotation automatically. Root ownership is a file-permission
+question, independent of CSI publication. This mover can read root-owned `0600`
+files, but a write through its read-only source mount still fails with `EROFS`.
+Dropping all capabilities also means UID 0 does not bypass arbitrary file-owner
+permission checks. Privileged containers, added capabilities, source writes,
+fsGroup and SELinux relabeling remain forbidden even with the namespace grant.
 
 Only an ordinary `emptyDir` cache is initially supported. The mover checks actual
 cache writability without `fsGroup` before invoking Kopia. A writable `emptyDir`

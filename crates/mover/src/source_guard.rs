@@ -16,6 +16,8 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 /// Check the two independent guard markers and then the actual kernel mount.
 /// Legacy operations without either marker keep their existing behavior.
+/// The checks apply identically to non-root and namespace-authorized root movers:
+/// UID 0 cannot substitute for a read-only mount or skip its verification.
 pub fn preflight(operation: &Operation, required_mount: Option<&Path>) -> io::Result<()> {
     let guarded = matches!(operation, Operation::Snapshot(op) if op.require_read_only_source);
     if guarded != required_mount.is_some() {

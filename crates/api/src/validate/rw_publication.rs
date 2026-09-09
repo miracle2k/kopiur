@@ -3,9 +3,7 @@
 //! CSI sees RW, but the mover sees RO; no permission to mutate the source follows
 //! from the backend publication acknowledgement.
 
-use crate::common::{
-    CacheDefaults, MoverSpec, requires_privilege_resolved, resolve_mover_for_rw_publication,
-};
+use crate::common::{CacheDefaults, MoverSpec, resolve_mover_for_rw_publication};
 use crate::error::{ValidationError, ValidationResult};
 use crate::snapshot_policy::{
     CopyMethod, SnapshotPolicySpec, policy_requests_rw_publication, source_read_only,
@@ -55,7 +53,10 @@ pub fn validate_rw_publication_cache(cache: Option<&CacheDefaults>) -> Validatio
 
 /// Reject forbidden effective settings without erasing any merged values. The
 /// caller must invoke this after repository defaults and inherited workload/PVC
-/// consumer contexts have been merged, before any Job is created.
+/// consumer contexts have been merged, before any Job is created. Root identity
+/// is governed by the existing namespace privilege gate, independently of these
+/// source-preservation rules: UID 0 never permits added capabilities, writable
+/// source mounts, or kubelet ownership/relabeling changes.
 pub fn validate_rw_publication_security_context(
     sc: &SecurityContext,
     psc: Option<&PodSecurityContext>,
@@ -99,16 +100,25 @@ pub fn validate_rw_publication_security_context(
         .seccomp_profile
         .as_ref()
         .is_some_and(|p| p.type_ == "RuntimeDefault");
-    if requires_privilege_resolved(Some(sc), psc, None)
-        || sc.run_as_non_root != Some(true)
+    let adds_capabilities = sc
+        .capabilities
+        .as_ref()
+        .and_then(|c| c.add.as_ref())
+        .is_some_and(|add| !add.is_empty());
+    // Do not use requires_privilege_resolved here: it intentionally includes
+    // root/disabled non-root identity, which the caller gates by namespace.
+    // These privileges remain forbidden even in an opted-in namespace.
+    if sc.privileged == Some(true)
+        || adds_capabilities
         || sc.allow_privilege_escalation != Some(false)
+        || sc.proc_mount.as_deref().is_some_and(|p| p != "Default")
         || !drops_all
         || !runtime_default
     {
         errs.push(invalid(
             "spec.mover.securityContext",
-            "RW-publication compatibility requires an unprivileged mover with \
-             runAsNonRoot: true, allowPrivilegeEscalation: false, capabilities.drop: \
+            "RW-publication compatibility requires privileged: false, \
+             allowPrivilegeEscalation: false, capabilities.drop: \
              [ALL], no added capabilities, and seccompProfile.type: RuntimeDefault",
         ));
     }
@@ -189,13 +199,6 @@ fn validate_rw_publication_explicit_mover(mover: &MoverSpec) -> Vec<ValidationEr
         &resolved.security_context,
         resolved.pod_security_context.as_ref(),
     );
-    if mover.privileged_mode == Some(true) {
-        errs.push(invalid(
-            "spec.mover.privilegedMode",
-            "privilegedMode is forbidden for RW-publication compatibility source movers; \
-             the separately gated cache initializer never receives the source mount",
-        ));
-    }
     if let Err(e) = validate_rw_publication_cache(mover.cache.as_ref()) {
         errs.push(e);
     }
@@ -486,27 +489,49 @@ sources:
     #[test]
     fn compatibility_rejects_weakened_hardening_even_in_privileged_namespaces() {
         for security in [
-            json!({"runAsUser": 0}),
-            json!({"runAsNonRoot": false}),
             json!({"privileged": true}),
             json!({"allowPrivilegeEscalation": true}),
             json!({"capabilities": {"add": ["SYS_ADMIN"]}}),
             json!({"capabilities": {"drop": []}}),
             json!({"seccompProfile": {"type": "Unconfined"}}),
+            json!({"procMount": "Unmasked"}),
         ] {
             let mut spec = policy();
             spec.mover = Some(MoverSpec {
                 security_context: Some(serde_json::from_value(security).unwrap()),
                 ..Default::default()
             });
-            assert!(errors(&spec).contains("unprivileged mover"));
+            assert!(errors(&spec).contains("RW-publication compatibility requires"));
         }
-        let mut spec = policy();
-        spec.mover = Some(MoverSpec {
-            privileged_mode: Some(true),
-            ..Default::default()
-        });
-        assert!(errors(&spec).contains("privilegedMode"));
+    }
+
+    #[test]
+    fn root_identity_is_left_to_the_existing_namespace_privilege_gate() {
+        for context in [
+            json!({"securityContext": {"runAsUser": 0, "runAsGroup": 0}}),
+            json!({"securityContext": {"runAsNonRoot": false}}),
+            json!({"podSecurityContext": {"runAsUser": 0, "runAsGroup": 0}}),
+            json!({"podSecurityContext": {"runAsNonRoot": false}}),
+            json!({"privilegedMode": true}),
+        ] {
+            let mover: MoverSpec = serde_json::from_value(context).unwrap();
+            let resolved = resolve_mover_for_rw_publication(
+                None,
+                mover.security_context.as_ref(),
+                mover.pod_security_context.as_ref(),
+                None,
+                None,
+                None,
+            );
+            assert!(crate::common::requires_privilege_resolved(
+                Some(&resolved.security_context),
+                resolved.pod_security_context.as_ref(),
+                mover.privileged_mode,
+            ));
+            let mut spec = policy();
+            spec.mover = Some(mover);
+            assert!(validate_backup_config(&spec).is_empty());
+        }
     }
 
     #[test]

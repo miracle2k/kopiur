@@ -94,6 +94,8 @@ pub fn policy() -> ValidatingAdmissionPolicy {
                 variable("ps", "variables.pod.spec"),
                 variable("mover", "variables.ps.containers[0]"),
                 variable("sc", "variables.mover.securityContext"),
+                variable("privilegedNamespace", &format!("namespaceObject != null && has(namespaceObject.metadata.annotations) && '{0}' in namespaceObject.metadata.annotations && namespaceObject.metadata.annotations['{0}'] == 'true'", crate::consts::PRIVILEGED_MOVERS_ANNOTATION)),
+                variable("nonRoot", "has(variables.sc.runAsNonRoot) ? variables.sc.runAsNonRoot : (has(variables.ps.securityContext) && has(variables.ps.securityContext.runAsNonRoot) && variables.ps.securityContext.runAsNonRoot)"),
                 variable("sourceVolumes", "variables.ps.volumes.filter(v, v.name == 'source')"),
                 variable("sourceMounts", "variables.mover.volumeMounts.filter(m, m.name == 'source')"),
                 variable("cacheVolumes", "variables.ps.volumes.filter(v, v.name == 'kopia-cache')"),
@@ -130,8 +132,17 @@ fn validations() -> Vec<Value> {
             "RW-publication movers forbid host namespaces and automatic service-account mounts; API credentials belong only in the main mover",
         ),
         validation(
-            "has(variables.sc.runAsNonRoot) && variables.sc.runAsNonRoot && variables.uid > 0 && has(variables.sc.allowPrivilegeEscalation) && !variables.sc.allowPrivilegeEscalation && (!has(variables.sc.privileged) || !variables.sc.privileged) && has(variables.sc.capabilities) && has(variables.sc.capabilities.drop) && 'ALL' in variables.sc.capabilities.drop && (!has(variables.sc.capabilities.add) || size(variables.sc.capabilities.add) == 0) && has(variables.sc.seccompProfile) && variables.sc.seccompProfile.type == 'RuntimeDefault' && (!has(variables.sc.procMount) || variables.sc.procMount == 'Default')",
-            "RW-publication main mover must retain non-root, no escalation, drop ALL, no added capabilities, and RuntimeDefault seccomp",
+            "has(variables.sc.allowPrivilegeEscalation) && !variables.sc.allowPrivilegeEscalation && (!has(variables.sc.privileged) || !variables.sc.privileged) && has(variables.sc.capabilities) && has(variables.sc.capabilities.drop) && 'ALL' in variables.sc.capabilities.drop && (!has(variables.sc.capabilities.add) || size(variables.sc.capabilities.add) == 0) && has(variables.sc.seccompProfile) && variables.sc.seccompProfile.type == 'RuntimeDefault' && (!has(variables.sc.procMount) || variables.sc.procMount == 'Default')",
+            "RW-publication main mover must retain no escalation, privileged false, drop ALL, no added capabilities, and RuntimeDefault seccomp",
+        ),
+        validation(
+            // Root reads still traverse the same read-only mount and mountinfo
+            // preflight. Namespace opt-in authorizes identity only, never an
+            // exception to any source or container-hardening rule above/below.
+            // Inspect both layers just like requires_privilege_resolved, so a
+            // conflicting Pod root setting cannot bypass the established gate.
+            "variables.privilegedNamespace || (variables.nonRoot && variables.uid > 0 && (!has(variables.ps.securityContext) || ((!has(variables.ps.securityContext.runAsUser) || variables.ps.securityContext.runAsUser != 0) && (!has(variables.ps.securityContext.runAsNonRoot) || variables.ps.securityContext.runAsNonRoot))))",
+            "Root or disabled non-root protection on the main mover requires the namespace's explicit kopiur.home-operations.com/privileged-movers=true annotation",
         ),
         validation(
             // Kubernetes' Go PVCVolumeSource.readOnly is a non-pointer bool
@@ -184,11 +195,7 @@ fn validations() -> Vec<Value> {
             "Cache-init requires root with only CHOWN, drop ALL, no escalation, a read-only root filesystem, and RuntimeDefault seccomp",
         ),
         validation(
-            &format!(
-                "!has(variables.ps.initContainers) || size(variables.ps.initContainers) == 0 || (namespaceObject != null && has(namespaceObject.metadata.annotations) && '{}' in namespaceObject.metadata.annotations && namespaceObject.metadata.annotations['{}'] == 'true')",
-                crate::consts::PRIVILEGED_MOVERS_ANNOTATION,
-                crate::consts::PRIVILEGED_MOVERS_ANNOTATION
-            ),
+            "!has(variables.ps.initContainers) || size(variables.ps.initContainers) == 0 || variables.privilegedNamespace",
             "Root cache initialization requires the namespace's explicit kopiur.home-operations.com/privileged-movers=true annotation",
         ),
     ]
@@ -254,6 +261,16 @@ mod tests {
     /// composition variables. This tests mutation rejection hermetically; the
     /// disposable Kubernetes suite additionally type-checks them server-side.
     fn denials(object: Value, old: Value, namespace_gate: bool) -> Vec<String> {
+        denials_in_namespace(
+            object,
+            old,
+            json!({"metadata": {"annotations": {
+                crate::consts::PRIVILEGED_MOVERS_ANNOTATION: namespace_gate.to_string()
+            }}}),
+        )
+    }
+
+    fn denials_in_namespace(object: Value, old: Value, namespace: Value) -> Vec<String> {
         let resource = if object["kind"] == "Job" {
             "jobs"
         } else {
@@ -264,13 +281,7 @@ mod tests {
         ctx.add_variable("oldObject", old).unwrap();
         ctx.add_variable("request", json!({"resource": {"resource": resource}}))
             .unwrap();
-        ctx.add_variable(
-            "namespaceObject",
-            json!({"metadata": {"annotations": {
-                crate::consts::PRIVILEGED_MOVERS_ANNOTATION: namespace_gate.to_string()
-            }}}),
-        )
-        .unwrap();
+        ctx.add_variable("namespaceObject", namespace).unwrap();
         let spec = policy().spec.unwrap();
         for condition in spec.match_conditions.unwrap() {
             match Program::compile(&condition.expression)
@@ -334,6 +345,122 @@ mod tests {
                 assert_eq!(denials(object, Value::Null, true), Vec::<String>::new());
             }
         }
+    }
+
+    #[test]
+    fn root_main_identity_is_namespace_gated_with_or_without_cache_init() {
+        assert!(
+            denials(pod(), Value::Null, false).is_empty(),
+            "default stays non-root"
+        );
+        for initializer in [false, true] {
+            let mut pod = pod();
+            let sc = &mut pod["spec"]["containers"][0]["securityContext"];
+            sc["runAsUser"] = json!(0);
+            sc["runAsGroup"] = json!(0);
+            sc["runAsNonRoot"] = json!(false);
+            if initializer {
+                let mut init = init();
+                init["args"] = json!(["cache-init", "--uid", "0", "--gid", "0"]);
+                pod["spec"]["initContainers"] = json!([init]);
+            }
+            let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"labels": {RW_PUBLICATION_LABEL: "true"}}, "spec": {"template": {"metadata": pod["metadata"], "spec": pod["spec"]}}});
+            for object in [pod, job] {
+                assert!(denials(object.clone(), Value::Null, true).is_empty());
+                assert!(
+                    denials(object.clone(), Value::Null, false)
+                        .iter()
+                        .any(|d| d.contains("main mover requires the namespace's explicit"))
+                );
+                for namespace in [
+                    Value::Null,
+                    json!({"metadata": {}}),
+                    json!({"metadata": {"annotations": {}}}),
+                ] {
+                    assert!(
+                        denials_in_namespace(object.clone(), Value::Null, namespace)
+                            .iter()
+                            .any(|d| d.contains("main mover requires the namespace's explicit"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inherited_root_and_removed_non_root_protection_cannot_bypass_namespace_gate() {
+        for psc in [json!({"runAsUser": 0}), json!({"runAsNonRoot": false})] {
+            let mut changed = pod();
+            changed["spec"]["securityContext"] = psc;
+            // Match the generic controller gate even if a container context
+            // would override the Pod's request for root identity.
+            changed["spec"]["containers"][0]["securityContext"]["runAsUser"] = json!(1000);
+            assert!(!denials(changed.clone(), Value::Null, false).is_empty());
+            assert!(denials(changed, Value::Null, true).is_empty());
+        }
+        for non_root in [None, Some(false)] {
+            let mut changed = pod();
+            let sc = changed["spec"]["containers"][0]["securityContext"]
+                .as_object_mut()
+                .unwrap();
+            sc.remove("runAsNonRoot");
+            if let Some(value) = non_root {
+                sc.insert("runAsNonRoot".into(), json!(value));
+            }
+            assert!(!denials(changed.clone(), Value::Null, false).is_empty());
+            assert!(denials(changed, Value::Null, true).is_empty());
+        }
+    }
+
+    #[test]
+    fn gated_root_identity_never_waives_source_or_container_safety() {
+        let mut root = pod();
+        root["spec"]["containers"][0]["securityContext"]["runAsUser"] = json!(0);
+        root["spec"]["containers"][0]["securityContext"]["runAsNonRoot"] = json!(false);
+        for (field, value, message) in [
+            ("privileged", json!(true), "privileged false"),
+            ("allowPrivilegeEscalation", json!(true), "no escalation"),
+            (
+                "capabilities",
+                json!({"drop": ["ALL"], "add": ["CHOWN"]}),
+                "no added capabilities",
+            ),
+            ("capabilities", json!({"drop": []}), "drop ALL"),
+            (
+                "seccompProfile",
+                json!({"type": "Unconfined"}),
+                "RuntimeDefault",
+            ),
+            ("procMount", json!("Unmasked"), "no escalation"),
+            (
+                "seLinuxOptions",
+                json!({"level": "s0:c100,c200"}),
+                "must never relabel",
+            ),
+        ] {
+            let mut changed = root.clone();
+            changed["spec"]["containers"][0]["securityContext"][field] = value;
+            assert_rejected(changed, message);
+        }
+        for (field, value, message) in [
+            ("fsGroup", json!(0), "must never rewrite"),
+            (
+                "fsGroupChangePolicy",
+                json!("OnRootMismatch"),
+                "must never rewrite",
+            ),
+            (
+                "seLinuxChangePolicy",
+                json!("Recursive"),
+                "must never relabel",
+            ),
+        ] {
+            let mut changed = root.clone();
+            changed["spec"]["securityContext"][field] = value;
+            assert_rejected(changed, message);
+        }
+        root["spec"]["containers"][0]["volumeMounts"][0]["readOnly"] = json!(false);
+        assert_rejected(root, "read-only filesystem mount");
     }
 
     #[test]

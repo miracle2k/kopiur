@@ -50,8 +50,11 @@ spec:
   - expression: (!has(variables.ps.hostNetwork) || !variables.ps.hostNetwork) && (!has(variables.ps.hostPID) || !variables.ps.hostPID) && (!has(variables.ps.hostIPC) || !variables.ps.hostIPC) && (!has(variables.ps.shareProcessNamespace) || !variables.ps.shareProcessNamespace) && has(variables.ps.automountServiceAccountToken) && !variables.ps.automountServiceAccountToken
     message: RW-publication movers forbid host namespaces and automatic service-account mounts; API credentials belong only in the main mover
     reason: Forbidden
-  - expression: has(variables.sc.runAsNonRoot) && variables.sc.runAsNonRoot && variables.uid > 0 && has(variables.sc.allowPrivilegeEscalation) && !variables.sc.allowPrivilegeEscalation && (!has(variables.sc.privileged) || !variables.sc.privileged) && has(variables.sc.capabilities) && has(variables.sc.capabilities.drop) && 'ALL' in variables.sc.capabilities.drop && (!has(variables.sc.capabilities.add) || size(variables.sc.capabilities.add) == 0) && has(variables.sc.seccompProfile) && variables.sc.seccompProfile.type == 'RuntimeDefault' && (!has(variables.sc.procMount) || variables.sc.procMount == 'Default')
-    message: RW-publication main mover must retain non-root, no escalation, drop ALL, no added capabilities, and RuntimeDefault seccomp
+  - expression: has(variables.sc.allowPrivilegeEscalation) && !variables.sc.allowPrivilegeEscalation && (!has(variables.sc.privileged) || !variables.sc.privileged) && has(variables.sc.capabilities) && has(variables.sc.capabilities.drop) && 'ALL' in variables.sc.capabilities.drop && (!has(variables.sc.capabilities.add) || size(variables.sc.capabilities.add) == 0) && has(variables.sc.seccompProfile) && variables.sc.seccompProfile.type == 'RuntimeDefault' && (!has(variables.sc.procMount) || variables.sc.procMount == 'Default')
+    message: RW-publication main mover must retain no escalation, privileged false, drop ALL, no added capabilities, and RuntimeDefault seccomp
+    reason: Forbidden
+  - expression: variables.privilegedNamespace || (variables.nonRoot && variables.uid > 0 && (!has(variables.ps.securityContext) || ((!has(variables.ps.securityContext.runAsUser) || variables.ps.securityContext.runAsUser != 0) && (!has(variables.ps.securityContext.runAsNonRoot) || variables.ps.securityContext.runAsNonRoot))))
+    message: Root or disabled non-root protection on the main mover requires the namespace's explicit kopiur.home-operations.com/privileged-movers=true annotation
     reason: Forbidden
   - expression: size(variables.sourceVolumes) == 1 && has(variables.sourceVolumes[0].persistentVolumeClaim) && (!has(variables.sourceVolumes[0].persistentVolumeClaim.readOnly) || !variables.sourceVolumes[0].persistentVolumeClaim.readOnly) && variables.ps.volumes.filter(v, has(v.persistentVolumeClaim)).size() == 1
     message: RW-publication requires exactly one writable PVC publication named source; additional PVC aliases are forbidden
@@ -83,7 +86,7 @@ spec:
   - expression: '!has(variables.ps.initContainers) || variables.ps.initContainers.all(i, has(i.securityContext) && i.securityContext.runAsUser == 0 && i.securityContext.runAsGroup == 0 && !i.securityContext.runAsNonRoot && !i.securityContext.allowPrivilegeEscalation && (!has(i.securityContext.privileged) || !i.securityContext.privileged) && i.securityContext.readOnlyRootFilesystem && i.securityContext.capabilities.drop == [''ALL''] && i.securityContext.capabilities.add == [''CHOWN''] && i.securityContext.seccompProfile.type == ''RuntimeDefault'' && (!has(i.securityContext.procMount) || i.securityContext.procMount == ''Default''))'
     message: Cache-init requires root with only CHOWN, drop ALL, no escalation, a read-only root filesystem, and RuntimeDefault seccomp
     reason: Forbidden
-  - expression: '!has(variables.ps.initContainers) || size(variables.ps.initContainers) == 0 || (namespaceObject != null && has(namespaceObject.metadata.annotations) && ''kopiur.home-operations.com/privileged-movers'' in namespaceObject.metadata.annotations && namespaceObject.metadata.annotations[''kopiur.home-operations.com/privileged-movers''] == ''true'')'
+  - expression: '!has(variables.ps.initContainers) || size(variables.ps.initContainers) == 0 || variables.privilegedNamespace'
     message: Root cache initialization requires the namespace's explicit kopiur.home-operations.com/privileged-movers=true annotation
     reason: Forbidden
   variables:
@@ -95,6 +98,10 @@ spec:
     name: mover
   - expression: variables.mover.securityContext
     name: sc
+  - expression: namespaceObject != null && has(namespaceObject.metadata.annotations) && 'kopiur.home-operations.com/privileged-movers' in namespaceObject.metadata.annotations && namespaceObject.metadata.annotations['kopiur.home-operations.com/privileged-movers'] == 'true'
+    name: privilegedNamespace
+  - expression: 'has(variables.sc.runAsNonRoot) ? variables.sc.runAsNonRoot : (has(variables.ps.securityContext) && has(variables.ps.securityContext.runAsNonRoot) && variables.ps.securityContext.runAsNonRoot)'
+    name: nonRoot
   - expression: variables.ps.volumes.filter(v, v.name == 'source')
     name: sourceVolumes
   - expression: variables.mover.volumeMounts.filter(m, m.name == 'source')

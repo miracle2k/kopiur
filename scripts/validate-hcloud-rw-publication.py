@@ -97,6 +97,21 @@ os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))
 print('existing app marker write succeeded; bytes and mtime preserved')
 """
 
+# Only the disposable fixture holder can prepare this third source baseline.
+# UID 0 with all capabilities dropped reads these files through ordinary owner
+# permission bits; it does not need DAC_OVERRIDE or a writable source mount.
+ROOT_OWNED_SOURCE = r"""
+import os, pathlib
+root = pathlib.Path('/data/ordinary-files')
+(root / 'root-private-marker').write_bytes(b'root-owned 0600 disposable marker\n')
+payload = root / 'payload'
+payload.write_bytes(os.urandom(32 * 1024 * 1024))
+for p in [root, *root.rglob('*')]:
+    os.chown(p, 0, 0)
+    os.chmod(p, 0o700 if p.is_dir() else 0o600)
+    os.utime(p, ns=(1700000000123456789, 1700000000123456789))
+"""
+
 # Credentials stay in this disposable Pod's environment and signed request. They
 # are never command arguments, output, existing cluster credentials, or AWS files.
 MAKE_BUCKET = r"""
@@ -544,7 +559,7 @@ class Drill:
         )
         self.report["wholeSourceBefore"] = self.source_before
 
-    def backup(self, name, initializer=False, replace_holder=False):
+    def backup(self, name, initializer=False, replace_holder=False, root_owned=False):
         if initializer:
             # Fresh bytes keep this second run uploading long enough for runtime
             # checks; repository deduplication would otherwise finish immediately.
@@ -558,6 +573,14 @@ class Drill:
                 self.exec_python("holder", WHOLE_SOURCE_INVENTORY)
             )
             self.report["wholeSourceBeforeInitializedCache"] = self.source_before
+        if root_owned:
+            self.exec_python("holder", ROOT_OWNED_SOURCE)
+            self.before = json.loads(self.exec_python("holder", INVENTORY))
+            self.report["sourceBeforeRootOwned"] = self.before
+            self.source_before = json.loads(
+                self.exec_python("holder", WHOLE_SOURCE_INVENTORY)
+            )
+            self.report["wholeSourceBeforeRootOwned"] = self.source_before
         source = {
             "pvc": {"name": "source"},
             "readOnly": True,
@@ -573,6 +596,12 @@ class Drill:
                     "podSecurityContext": {"supplementalGroups": [65532]},
                 }
             )
+        if root_owned:
+            mover["securityContext"] = {
+                "runAsUser": 0,
+                "runAsGroup": 0,
+                "runAsNonRoot": False,
+            }
         self.create(
             "SnapshotPolicy",
             name,
@@ -601,6 +630,24 @@ class Drill:
         self.check(
             len(spec["containers"]) == 1,
             f"{name}: exactly one ordinary mover container",
+        )
+        mover_context = spec["containers"][0].get("securityContext", {})
+        self.check(
+            mover_context.get("allowPrivilegeEscalation") is False
+            and "ALL" in mover_context.get("capabilities", {}).get("drop", [])
+            and not mover_context.get("capabilities", {}).get("add")
+            and mover_context.get("seccompProfile", {}).get("type") == "RuntimeDefault",
+            f"{name}: mover retains no added capabilities, no escalation and RuntimeDefault seccomp",
+        )
+        self.check(
+            (
+                mover_context.get("runAsUser") == 0
+                and mover_context.get("runAsGroup") == 0
+                and mover_context.get("runAsNonRoot") is False
+            )
+            if root_owned
+            else mover_context.get("runAsNonRoot") is True,
+            f"{name}: {'explicit root UID/GID without a new API opt-in flag' if root_owned else 'default non-root hardening retained'}",
         )
         source_volume = next(v for v in spec["volumes"] if v["name"] == "source")
         mount = next(
@@ -739,13 +786,115 @@ class Drill:
             whole_after == self.source_before,
             f"{name}: complete source including PVC root, lost+found and seed marker unchanged",
         )
+        if root_owned:
+            self.report["rootMoverSecurityContext"] = mover_context
+            marker = after["root-private-marker"]
+            self.check(
+                marker["uid"] == 0 and marker["gid"] == 0 and marker["mode"] == 0o600,
+                "root-owned-source: root-owned 0600 marker backed up without source permission changes",
+            )
+
+    def root_namespace_negative(self):
+        """The existing namespace grant is mandatory even for a capless root mover."""
+        annotation = "kopiur.home-operations.com/privileged-movers"
+        self.kube("annotate", "namespace", self.ns, f"{annotation}-", namespaced=False)
+        try:
+            job = self.get("job", "root-owned-source")
+            for kind in ("Job", "Pod"):
+                template = job["spec"]["template"]
+                meta = job["metadata"] if kind == "Job" else template["metadata"]
+                metadata = {
+                    key: copy.deepcopy(meta[key])
+                    for key in ("labels", "annotations")
+                    if key in meta
+                }
+                metadata.update(
+                    {"name": f"root-without-gate-{kind.lower()}", "namespace": self.ns}
+                )
+                spec = copy.deepcopy(job["spec"] if kind == "Job" else template["spec"])
+                if kind == "Job":
+                    spec.pop("selector", None)
+                    for key in (
+                        "controller-uid",
+                        "batch.kubernetes.io/controller-uid",
+                        "job-name",
+                        "batch.kubernetes.io/job-name",
+                    ):
+                        spec["template"]["metadata"].get("labels", {}).pop(key, None)
+                obj = {
+                    "apiVersion": "batch/v1" if kind == "Job" else "v1",
+                    "kind": kind,
+                    "metadata": metadata,
+                    "spec": spec,
+                }
+                result = self.kube(
+                    "create",
+                    "--dry-run=server",
+                    "-f",
+                    "-",
+                    body=json.dumps(obj),
+                    allow_missing=True,
+                )
+                self.check(
+                    result is None and "kopiur-rw-publication" in self.last_error,
+                    f"root namespace gate: {kind} rejected by admission without namespace permission",
+                )
+            policy = copy.deepcopy(
+                self.get("snapshotpolicy", "root-owned-source")["spec"]
+            )
+            self.create("SnapshotPolicy", "root-without-gate", policy)
+            self.create(
+                "Snapshot",
+                "root-without-gate",
+                {
+                    "policyRef": {"name": "root-without-gate"},
+                    "deletionPolicy": "Retain",
+                },
+            )
+            obj = self.wait(
+                "root Snapshot was not denied by namespace gate",
+                lambda: next(
+                    (
+                        s
+                        for s in [self.get("snapshot", "root-without-gate")]
+                        if any(
+                            c.get("type") == "MoverPermitted"
+                            and c.get("status") == "False"
+                            and c.get("reason") == "PrivilegedMoverNotPermitted"
+                            for c in (s or {}).get("status", {}).get("conditions", [])
+                        )
+                    ),
+                    None,
+                ),
+            )
+            self.report["rootWithoutNamespaceGateStatus"] = obj["status"]
+            self.check(
+                self.get("job", "root-without-gate") is None,
+                "root namespace gate: controller refuses root before creating any Job",
+            )
+            self.kube("delete", "snapshot", "root-without-gate", "--wait=false")
+            self.kube("delete", "snapshotpolicy", "root-without-gate", "--wait=false")
+            self.wait(
+                "negative root fixture cleanup incomplete",
+                lambda: self.get("snapshot", "root-without-gate") is None
+                and self.get("snapshotpolicy", "root-without-gate") is None,
+            )
+        finally:
+            self.kube(
+                "annotate",
+                "namespace",
+                self.ns,
+                f"{annotation}=true",
+                "--overwrite",
+                namespaced=False,
+            )
 
     def restore(self):
         self.create(
             "Restore",
             "scratch-restore",
             {
-                "source": {"snapshotRef": {"name": "initialized-cache"}},
+                "source": {"snapshotRef": {"name": "root-owned-source"}},
                 "target": {
                     "pvc": {
                         "name": "scratch",
@@ -917,6 +1066,8 @@ def main():
         drill.provision()
         drill.backup("ordinary-cache", replace_holder=True)
         drill.backup("initialized-cache", initializer=True)
+        drill.backup("root-owned-source", root_owned=True)
+        drill.root_namespace_negative()
         drill.restore()
         drill.rwop_negative()
     except (Exception, KeyboardInterrupt) as error:  # noqa: BLE001 -- cleanup must run for every failure

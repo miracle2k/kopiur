@@ -611,9 +611,13 @@ fn validate_publication(inputs: &MoverJobInputs<'_>) -> Result<bool, BuildJobErr
             .unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
         let gid = kopiur_api::common::effective_run_as_group(Some(sc), psc)
             .unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
-        if target.uid == 0 || i64::from(target.uid) != uid || i64::from(target.gid) != gid {
+        if target.uid == u32::MAX
+            || target.gid == u32::MAX
+            || i64::from(target.uid) != uid
+            || i64::from(target.gid) != gid
+        {
             return Err(fail(
-                "cache ownership target must match the effective non-root mover UID/GID",
+                "cache ownership target must match the effective mover UID/GID",
             ));
         }
     }
@@ -1321,7 +1325,6 @@ mod tests {
             "fsGroupChangePolicy",
             "privileged",
             "caps",
-            "nonroot",
             "escalation",
             "seccomp",
             "ephemeral",
@@ -1345,7 +1348,6 @@ mod tests {
                     i.security_context.capabilities.as_mut().unwrap().add =
                         Some(vec!["SYS_ADMIN".into()])
                 }
-                "nonroot" => i.security_context.run_as_non_root = Some(false),
                 "escalation" => i.security_context.allow_privilege_escalation = Some(true),
                 "seccomp" => {
                     i.security_context.seccomp_profile.as_mut().unwrap().type_ = "Unconfined".into()
@@ -1551,6 +1553,166 @@ mod tests {
                     assert!(!rendered_admission_denials(rendered, false).is_empty());
                 }
             }
+        }
+    }
+
+    fn root_compatibility_inputs(ws: &MoverWorkSpec, initializer: bool) -> MoverJobInputs<'_> {
+        let mut i = compatibility_inputs(ws);
+        i.security_context.run_as_user = Some(0);
+        i.security_context.run_as_group = Some(0);
+        i.security_context.run_as_non_root = Some(false);
+        i.cache_ownership = initializer.then_some(CacheOwnershipTarget { uid: 0, gid: 0 });
+        i
+    }
+
+    #[test]
+    fn root_compatibility_movers_keep_ro_protection_and_require_the_namespace_gate() {
+        for initializer in [false, true] {
+            let ws = compatibility_work_spec();
+            let i = root_compatibility_inputs(&ws, initializer);
+            let rendered = build_job(&i).unwrap();
+            let ps = rendered
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap();
+            let mover = &ps.containers[0];
+            let sc = mover.security_context.as_ref().unwrap();
+            assert_eq!(sc.run_as_user, Some(0));
+            assert_eq!(sc.run_as_non_root, Some(false));
+            assert_eq!(sc.allow_privilege_escalation, Some(false));
+            assert_ne!(sc.privileged, Some(true));
+            assert!(
+                sc.capabilities
+                    .as_ref()
+                    .unwrap()
+                    .add
+                    .as_ref()
+                    .is_none_or(Vec::is_empty)
+            );
+            assert_eq!(
+                sc.capabilities.as_ref().unwrap().drop.as_deref(),
+                Some(["ALL".to_string()].as_slice())
+            );
+            assert!(ps.security_context.as_ref().unwrap().fs_group.is_none());
+            assert!(
+                ps.security_context
+                    .as_ref()
+                    .unwrap()
+                    .fs_group_change_policy
+                    .is_none()
+            );
+            assert_eq!(
+                mover.args.as_deref(),
+                Some(
+                    [
+                        REQUIRED_READ_ONLY_SOURCE_ARG.to_string(),
+                        "/data".to_string()
+                    ]
+                    .as_slice()
+                )
+            );
+            assert_eq!(
+                mover
+                    .volume_mounts
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|mount| mount.name == "source")
+                    .unwrap()
+                    .read_only,
+                Some(true)
+            );
+            if initializer {
+                let init = &ps.init_containers.as_ref().unwrap()[0];
+                assert_eq!(
+                    init.args.as_deref(),
+                    Some(
+                        [
+                            "cache-init".to_string(),
+                            "--uid".to_string(),
+                            "0".to_string(),
+                            "--gid".to_string(),
+                            "0".to_string()
+                        ]
+                        .as_slice()
+                    )
+                );
+                let mounts = init.volume_mounts.as_ref().unwrap();
+                assert_eq!(mounts.len(), 1);
+                assert_eq!(mounts[0].name, "kopia-cache");
+                assert!(init.env.is_none() && init.env_from.is_none());
+            }
+            let job = serde_json::to_value(rendered).unwrap();
+            let pod = serde_json::json!({
+                "apiVersion": "v1", "kind": "Pod",
+                "metadata": job["spec"]["template"]["metadata"],
+                "spec": job["spec"]["template"]["spec"],
+            });
+            for object in [job, pod] {
+                let denials = rendered_admission_denials(object.clone(), true);
+                assert!(denials.is_empty(), "authorized root mover: {denials:?}");
+                assert!(
+                    !rendered_admission_denials(object, false).is_empty(),
+                    "root main requires namespace authorization even without cache-init"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_identity_does_not_authorize_mount_host_or_capability_mutations() {
+        let ws = compatibility_work_spec();
+        let job = serde_json::to_value(build_job(&root_compatibility_inputs(&ws, true)).unwrap())
+            .unwrap();
+        let pod = serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": job["spec"]["template"]["metadata"],
+            "spec": job["spec"]["template"]["spec"],
+        });
+        for change in [
+            "sourceRW",
+            "initSource",
+            "fsGroup",
+            "fsGroupChangePolicy",
+            "capability",
+            "privileged",
+            "escalation",
+            "seccomp",
+            "hostNetwork",
+            "hostPID",
+            "hostIPC",
+            "hostPath",
+            "propagation",
+            "guardRemoved",
+        ] {
+            let mut altered = pod.clone();
+            let ps = &mut altered["spec"];
+            match change {
+                "sourceRW" => {
+                    let mount = ps["containers"][0]["volumeMounts"].as_array_mut().unwrap().iter_mut().find(|mount| mount["name"] == "source").unwrap();
+                    mount["readOnly"] = serde_json::json!(false);
+                },
+                "initSource" => ps["initContainers"][0]["volumeMounts"].as_array_mut().unwrap().push(serde_json::json!({"name": "source", "mountPath": "/source", "readOnly": true})),
+                "fsGroup" => ps["securityContext"]["fsGroup"] = serde_json::json!(0),
+                "fsGroupChangePolicy" => ps["securityContext"]["fsGroupChangePolicy"] = serde_json::json!("OnRootMismatch"),
+                "capability" => ps["containers"][0]["securityContext"]["capabilities"]["add"] = serde_json::json!(["CHOWN"]),
+                "privileged" => ps["containers"][0]["securityContext"]["privileged"] = serde_json::json!(true),
+                "escalation" => ps["containers"][0]["securityContext"]["allowPrivilegeEscalation"] = serde_json::json!(true),
+                "seccomp" => ps["containers"][0]["securityContext"]["seccompProfile"]["type"] = serde_json::json!("Unconfined"),
+                "hostNetwork" | "hostPID" | "hostIPC" => ps[change] = serde_json::json!(true),
+                "hostPath" => ps["volumes"].as_array_mut().unwrap().push(serde_json::json!({"name": "host", "hostPath": {"path": "/"}})),
+                "propagation" => ps["containers"][0]["volumeMounts"][0]["mountPropagation"] = serde_json::json!("Bidirectional"),
+                "guardRemoved" => { ps["containers"][0].as_object_mut().unwrap().remove("args"); },
+                _ => unreachable!(),
+            }
+            assert!(
+                !rendered_admission_denials(altered, true).is_empty(),
+                "root must not permit {change}"
+            );
         }
     }
 

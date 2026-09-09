@@ -96,7 +96,7 @@ pub(super) fn validate_effective(
             let uid = uid.unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
             let gid = gid.unwrap_or(kopiur_api::common::MOVER_NONROOT_ID);
             match (u32::try_from(uid).ok(), u32::try_from(gid).ok()) {
-                (Some(uid), Some(gid)) if uid > 0 && uid < u32::MAX && gid < u32::MAX => Ok(Some(CacheOwnershipTarget { uid, gid })),
+                (Some(uid), Some(gid)) if uid < u32::MAX && gid < u32::MAX => Ok(Some(CacheOwnershipTarget { uid, gid })),
                 _ => Err(Error::Validation("cache ownership: InitContainer requires valid effective mover UID/GID; source file ownership is never guessed".into())),
             }
         }
@@ -136,9 +136,14 @@ pub(super) async fn validate_live_claim(
     validate_claim(&pvc)
 }
 
-/// Unlike the legacy privileged-mover helper, a namespaced install lacking
-/// namespaces:get must fail closed for this NEW root init-container option.
-pub(super) async fn cache_init_allowed(client: &kube::Client, ns: &str) -> Result<bool> {
+/// The existing namespace privilege grant governs both a root main mover and
+/// cache-only initialization. Unlike the legacy namespaced-install fallback,
+/// failure to read the namespace cannot count as an explicit grant for RW
+/// publication. This changes no ordinary mover's privilege-gate behavior.
+pub(super) async fn namespace_allows_privileged_movers(
+    client: &kube::Client,
+    ns: &str,
+) -> Result<bool> {
     let namespace = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
         .get(ns)
         .await?;
@@ -247,6 +252,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!((target.uid, target.gid), (1000, 2000));
+        // Root is a process identity, not permission to weaken source mounts.
+        // The caller applies the existing namespace grant before Job creation.
+        mover.security_context.run_as_user = Some(0);
+        mover.security_context.run_as_group = Some(0);
+        mover.security_context.run_as_non_root = Some(false);
+        let target = validate_effective(&policy, &backend, &mover)
+            .unwrap()
+            .unwrap();
+        assert_eq!((target.uid, target.gid), (0, 0));
+        assert!(requires_privilege_resolved(
+            Some(&mover.security_context),
+            mover.pod_security_context.as_ref(),
+            None,
+        ));
         mover.pod_security_context.as_mut().unwrap().fs_group = Some(999);
         assert!(
             validate_effective(&policy, &backend, &mover)
@@ -260,5 +279,61 @@ mod tests {
         mover.cache = None;
         let filesystem = serde_json::from_value(json!({"filesystem": {"path": "/repo"}})).unwrap();
         assert!(validate_effective(&policy, &filesystem, &mover).is_err());
+    }
+
+    fn namespace_client(status: u16, body: serde_json::Value) -> kube::Client {
+        use kube::client::Body;
+        let svc = tower::service_fn(move |req: http::Request<Body>| {
+            let body = body.to_string();
+            async move {
+                assert_eq!(req.method(), http::Method::GET);
+                assert_eq!(req.uri().path(), "/api/v1/namespaces/test-ns");
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        kube::Client::new(svc, "default")
+    }
+
+    #[tokio::test]
+    async fn compatibility_root_and_init_require_an_explicit_existing_namespace_grant() {
+        for value in [None, Some("false"), Some("TRUE"), Some("true")] {
+            let annotations =
+                value.map(|v| json!({kopiur_api::consts::PRIVILEGED_MOVERS_ANNOTATION: v}));
+            let client = namespace_client(
+                200,
+                json!({
+                    "apiVersion": "v1", "kind": "Namespace",
+                    "metadata": {"name": "test-ns", "annotations": annotations}
+                }),
+            );
+            assert_eq!(
+                namespace_allows_privileged_movers(&client, "test-ns")
+                    .await
+                    .unwrap(),
+                value == Some("true"),
+            );
+        }
+        // The ordinary mover's historical 403 fallback must never turn an
+        // unreadable namespace into an explicit grant for RW publication.
+        for (status, reason) in [(403, "Forbidden"), (404, "NotFound")] {
+            let client = namespace_client(
+                status,
+                json!({
+                    "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                    "message": reason, "reason": reason, "code": status
+                }),
+            );
+            assert!(
+                namespace_allows_privileged_movers(&client, "test-ns")
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

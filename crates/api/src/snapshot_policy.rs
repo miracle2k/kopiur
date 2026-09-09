@@ -376,6 +376,9 @@ pub struct Source {
     /// could otherwise recursively rewrite ownership or modes on the live source.
     /// Effective `seLinuxOptions` or `seLinuxChangePolicy` is also forbidden to
     /// prevent source relabeling; this mode grants access only through process identity.
+    /// A root mover identity requires the existing namespace annotation
+    /// `kopiur.home-operations.com/privileged-movers: "true"`; it still receives
+    /// a read-only source mount, no added capabilities, and no privilege escalation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pvc_publication_read_only: Option<bool>,
     /// Explicitly accepts a writable CSI publication while the mover container's

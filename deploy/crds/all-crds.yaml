@@ -8935,6 +8935,9 @@ spec:
                         could otherwise recursively rewrite ownership or modes on the live source.
                         Effective `seLinuxOptions` or `seLinuxChangePolicy` is also forbidden to
                         prevent source relabeling; this mode grants access only through process identity.
+                        A root mover identity requires the existing namespace annotation
+                        `kopiur.home-operations.com/privileged-movers: "true"`; it still receives
+                        a read-only source mount, no added capabilities, and no privilege escalation.
                       nullable: true
                       type: boolean
                     pvcSelector:

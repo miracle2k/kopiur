@@ -13,9 +13,9 @@ pub fn prepare(uid: u32, gid: u32) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
-    if uid == 0 || uid == u32::MAX || gid == u32::MAX {
+    if uid == u32::MAX || gid == u32::MAX {
         return Err(io::Error::other(
-            "cache ownership requires a valid non-root UID and valid GID",
+            "cache ownership requires a valid UID and GID",
         ));
     }
     let cache = std::fs::OpenOptions::new()
@@ -36,6 +36,8 @@ pub fn prepare(uid: u32, gid: u32) -> io::Result<()> {
             "cache initializer refuses non-empty cache roots; no recursive ownership changes are permitted",
         ));
     }
+    // UID 0 is valid for an explicitly namespace-authorized root mover. Keeping
+    // a fresh cache root-owned never grants the initializer a source mount.
     // chmod while we still own the directory, then chown last. CHOWN is the only
     // added capability; the syscall touches precisely this opened root inode.
     cache.set_permissions(std::fs::Permissions::from_mode(0o700))?;

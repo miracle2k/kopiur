@@ -80,7 +80,7 @@ pub enum MoverCommand {
     /// Prepare only the fixed cache root. This deliberately gated root init
     /// container has no source, repository, credential, or work-spec mounts.
     CacheInit {
-        /// Effective mover UID (must be nonzero).
+        /// Effective mover UID, including 0 for an authorized root mover.
         #[arg(long)]
         uid: u32,
         /// Effective mover GID.
@@ -131,6 +131,27 @@ mod tests {
         let cli = parse(&[]);
         assert!(cli.command.is_none());
         assert_eq!(cli.work_spec, None);
+    }
+
+    #[test]
+    #[serial]
+    fn cache_init_accepts_the_resolved_root_identity_without_any_source_argument() {
+        assert!(matches!(
+            parse(&["cache-init", "--uid", "0", "--gid", "0"]).command,
+            Some(MoverCommand::CacheInit { uid: 0, gid: 0 })
+        ));
+        assert!(
+            MoverCli::try_parse_from([
+                "kopiur-mover",
+                "cache-init",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "/pvc/source"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
